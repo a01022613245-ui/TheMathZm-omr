@@ -8,118 +8,346 @@
   <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
-  <script>
-    if (typeof pdfjsLib !== 'undefined') {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+  <script src="./pdf.min.js"></script>
+  <script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <style>
+    .file-btn-wrap { position:relative; display:inline-block; }
+    .file-btn-wrap input[type=file] {
+      position:absolute; top:0; left:0; width:100%; height:100%;
+      opacity:0; cursor:pointer; font-size:0;
     }
-  </script>
+  </style>
 </head>
 <body class="bg-gray-50">
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useRef, useCallback } = React;
+const { useState } = React;
 
-// ===== CONSTANTS =====
 const ADMIN_CODE = 'fjskmath1234';
 
-// ===== INITIAL DATA =====
-const hw1Qs = [
-  ...[4,2,3,1,5,4,2,3,1,5,4,2,3,1,5,4,2,3,1,5].map((a,i)=>({number:i+1,type:'multiple',answer:String(a)})),
-  ...['11','3','짝수','참','거짓'].map((a,i)=>({number:21+i,type:'short',answer:a})),
-];
-const hw2Qs = [
-  ...[3,5,1,4,2,3,5,1,4,2,3,5,1,4,2,3,5,1,4,2].map((a,i)=>({number:i+1,type:'multiple',answer:String(a)})),
-  ...['명제','역','대우','역명제','동치'].map((a,i)=>({number:21+i,type:'short',answer:a})),
-];
-const hw3Qs = [
-  ...[2,4,3,1,5,2,4,3,1,5,2,4,3,1,5,2,4,3,1,5].map((a,i)=>({number:i+1,type:'multiple',answer:String(a)})),
-  ...['f(x)','정의역','공역','치역','x'].map((a,i)=>({number:21+i,type:'short',answer:a})),
-];
-
-const INIT_TEACHERS = [
-  {id:'t1', name:'권태현', loginCode:'0000', classIds:['c1']}
-];
-const INIT_CLASSES = [
-  {id:'c1', name:'고1 수학A반', teacherId:'t1', studentIds:['s1','s2','s3'], homeworkIds:['hw1','hw2','hw3']}
-];
+// ── 초기 데이터 ──
+const INIT_TEACHERS = [{id:'t1',name:'권태현',loginCode:'0000',classIds:['c1']}];
+const INIT_CLASSES  = [{id:'c1',name:'고1 수학A반',teacherId:'t1',studentIds:['s1'],homeworkIds:[]}];
 const INIT_STUDENTS = [
-  {id:'s1', name:'이채원', schoolType:'고등학교', grade:'1', loginCode:'1234', classId:'c1'},
-  {id:'s2', name:'권회준', schoolType:'고등학교', grade:'1', loginCode:'5678', classId:'c1'},
-  {id:'s3', name:'김시연', schoolType:'고등학교', grade:'1', loginCode:'9012', classId:'c1'},
+  {id:'s1',name:'이맺음',schoolType:'고등학교',grade:'1',loginCode:'1234',classId:'c1'},
 ];
-const INIT_HOMEWORKS = [
-  {id:'hw1', title:'7. 명제 (1)', classId:'c1', questions:hw1Qs},
-  {id:'hw2', title:'7. 명제 (2)', classId:'c1', questions:hw2Qs},
-  {id:'hw3', title:'8. 함수 (2)', classId:'c1', questions:hw3Qs},
-];
+const INIT_HOMEWORKS = [];
 
-// ===== PARSE =====
-function parseAnswerSheet(text) {
-  const circled = {'①':'1','②':'2','③':'3','④':'4','⑤':'5'};
-  const results = {};
+// ── LaTeX 정규화 및 KaTeX 렌더링 ──
+function normalizeMathExpression(text) {
+  let t = text;
+  // 유니코드 마이너스 → 하이픈
+  t = t.replace(/−/g, '-');
+  // 분수: 숫자/숫자 또는 영문자/영문자 → \frac{}{} (단, URL 등 방지를 위해 양쪽이 짧은 표현인 경우만)
+  t = t.replace(/\b([A-Za-z0-9]+)\/([A-Za-z0-9]+)\b/g, '\\frac{$1}{$2}');
+  // 제곱근: √N 또는 sqrt(N)
+  t = t.replace(/√([A-Za-z0-9]+)/g, '\\sqrt{$1}');
+  t = t.replace(/sqrt\(([^)]+)\)/g, '\\sqrt{$1}');
+  // 지수: x^2 → x^{2} (이미 중괄호 있는 경우 제외)
+  t = t.replace(/\^([A-Za-z0-9]+)(?!\})/g, '^{$1}');
+  // LaTeX 명령어가 포함되어 있으면 $...$ 로 감싸기
+  if (/\\(frac|sqrt|pi|infty|pm|cdot|times|div|leq|geq|neq|in|notin|subset|supset|emptyset)/.test(t) || /\^\{/.test(t)) {
+    if (!/^\$.*\$$/.test(t)) t = '$' + t + '$';
+  }
+  return t;
+}
 
-  // Normalize: replace multiple spaces/tabs with single space
-  const normalized = text.replace(/\r/g,'').replace(/[ \t]+/g,' ');
-  const lines = normalized.split('\n');
+function renderLatex(text) {
+  if (!text) return '';
+  const normalized = normalizeMathExpression(text);
+  if (window.katex && /\$[^$]+\$/.test(normalized)) {
+    try {
+      const html = normalized.replace(/\$([^$]+)\$/g, (_, expr) => {
+        return window.katex.renderToString(expr, { throwOnError: false, displayMode: false });
+      });
+      return html;
+    } catch(e) {
+      // fallback to escaped text
+    }
+  }
+  // エスケープして返す
+  return normalized.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
+// ── PDF 텍스트 추출 (텍스트 레이어) ──
+async function extractPDFTextDirect(lib, pdf) {
+  const allLines = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page    = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const map = {};
+    for (const item of content.items) {
+      if (!item.str || !item.str.trim()) continue;
+      const y = Math.round(item.transform[5]);
+      (map[y] = map[y] || []).push({ x: item.transform[4], s: item.str });
+    }
+    Object.keys(map).map(Number).sort((a,b)=>b-a).forEach(y => {
+      const line = map[y].sort((a,b)=>a.x-b.x).map(i=>i.s).join('');
+      if (line.trim()) allLines.push(line);
+    });
+  }
+  return allLines.join('\n');
+}
+
+// ── Otsu 알고리즘 이진화 (자동 임계값, 원문자 인식 최적화) ──
+function binarizeCanvas(canvas) {
+  const ctx = canvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d   = img.data;
+  const total = canvas.width * canvas.height;
+
+  // 그레이스케일 히스토그램 계산
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4)
+    hist[Math.round(d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114)]++;
+
+  // Otsu 최적 임계값 탐색
+  let sum = 0;
+  for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let wB = 0, sumB = 0, maxSigma = 0, thresh = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (!wB) continue;
+    const wF = total - wB;
+    if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const sigma = wB * wF * (mB - mF) * (mB - mF);
+    if (sigma > maxSigma) { maxSigma = sigma; thresh = t; }
+  }
+
+  // 임계값으로 흑백 변환 (글자 경계 보존을 위해 thresh+10 사용)
+  const T = Math.min(thresh + 10, 240);
+  for (let i = 0; i < d.length; i += 4) {
+    const g = d[i]*0.299 + d[i+1]*0.587 + d[i+2]*0.114;
+    d[i] = d[i+1] = d[i+2] = g < T ? 0 : 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ── OCR 결과에서 답안 줄만 필터링 ──
+function filterAnswerLines(rawText) {
+  // 원문자 유니코드 블록 및 공통 OCR 오인식 패턴 포함
+  const ANS = /[①②③④⑤]|[①-⑤]/;
+  const lines = rawText.split('\n');
+  const kept = [];
   for (const line of lines) {
-    const t = line.trim();
-    if (!t) continue;
+    const l = line.trim();
+    if (!l || l.length < 2) continue;
+    // [정답] 포함하는 줄
+    if (l.includes('정답')) { kept.push(l); continue; }
+    // "숫자 + 답" 형태: "01 3", "02 ④", "1 ②", "0700 ⑤"
+    if (/^\d{1,4}\s/.test(l) && /\d|[①②③④⑤]|[가-힣]/.test(l.slice(2))) { kept.push(l); continue; }
+    // 줄 안에 원문자가 있고, 앞에 숫자가 있음
+    if (ANS.test(l) && /\d/.test(l)) { kept.push(l); continue; }
+    // "N) 답" 형태
+    if (/^\d+\s*[)）]/.test(l)) { kept.push(l); continue; }
+  }
+  return kept.join('\n');
+}
 
-    // Pattern: "1) [정답] ④" or "1) [정답] 답안텍스트"
-    const p1 = t.matchAll(/(\d+)\)\s*\[정답\]\s*([①②③④⑤]|[^\s\[]+)?/g);
-    for (const m of p1) {
-      const num = parseInt(m[1]);
-      const raw = (m[2]||'').trim();
-      if (num > 0) addQ(results, num, raw, circled);
+// ── PDF OCR (스캔 이미지 PDF용) ──
+async function extractPDFTextOCR(lib, pdf, onStatus) {
+  if (!window.Tesseract) throw new Error('OCR 라이브러리(Tesseract)가 로드되지 않았습니다. 인터넷 연결을 확인하세요.');
+
+  onStatus('OCR 워커 초기화 중... (최초 실행 시 언어 데이터 다운로드로 1-2분 소요)');
+
+  // scale=10 + kor: 실험으로 확인된 최적 설정 (원문자 (N) 패턴 인식)
+  const worker = await window.Tesseract.createWorker('kor', 1, {
+    logger: m => {
+      if (m.status === 'loading tesseract core') onStatus('OCR 코어 로딩 중...');
+      else if (m.status === 'initializing tesseract') onStatus('OCR 초기화 중...');
+      else if (m.status === 'loading language traineddata') onStatus('한국어 데이터 다운로드 중...');
+      else if (m.status === 'initializing api') onStatus('OCR API 초기화 중...');
+      else if (m.status === 'recognizing text') onStatus(`텍스트 인식 중: ${Math.round(m.progress * 100)}%`);
+    },
+  });
+
+  await worker.setParameters({
+    tessedit_pageseg_mode: '6',   // 단일 균일 블록 (표 구조에 최적)
+    preserve_interword_spaces: '1',
+  });
+
+  const allFiltered = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    onStatus(`페이지 ${p}/${pdf.numPages} OCR 처리 중...`);
+    const page     = await pdf.getPage(p);
+    // scale=10: 원문자를 (N) 패턴으로 안정적으로 인식하는 최적 해상도
+    const viewport = page.getViewport({ scale: 10 });
+    const canvas   = document.createElement('canvas');
+    canvas.width   = viewport.width;
+    canvas.height  = viewport.height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    // 이진화 생략: scale=10에서는 원본 이미지가 더 정확
+    const { data: { text } } = await worker.recognize(canvas);
+    const filtered = filterAnswerLines(text);
+    if (filtered.trim()) allFiltered.push(filtered);
+  }
+
+  await worker.terminate();
+  // 분수 고아 줄 복원 후 반환
+  return mergeFractionOrphans(allFiltered.join('\n'));
+}
+
+// ── 통합 PDF 추출 (텍스트 레이어 → OCR 폴백) ──
+async function extractPDFText(file, onStatus) {
+  const lib = window.pdfjsLib;
+  if (!lib) throw new Error('PDF 라이브러리(pdfjsLib)가 로드되지 않았습니다. 페이지를 새로고침하세요.');
+
+  lib.GlobalWorkerOptions.workerSrc = window.location.origin + '/pdf.worker.min.js';
+
+  onStatus && onStatus('PDF 로딩 중...');
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await lib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+
+  onStatus && onStatus(`PDF 로드 완료 (${pdf.numPages}페이지). 텍스트 추출 시도 중...`);
+  const direct = await extractPDFTextDirect(lib, pdf);
+
+  if (direct.trim()) return direct;
+
+  // 텍스트 레이어 없음 → OCR 폴백
+  onStatus && onStatus('텍스트 레이어 없음. OCR 모드로 전환합니다...');
+  return await extractPDFTextOCR(lib, pdf, onStatus);
+}
+
+// ── 답지 파싱 ──
+// ── OCR 텍스트 전처리 (scale=10 kor 오인식 패턴 기반) ──
+function normalizeOCR(text) {
+  const C = {'1':'①','2':'②','3':'③','4':'④','5':'⑤','9':'④'};
+  let t = text
+    .replace(/@/g,'②')                    // @ → ② (가장 흔한 오인식)
+    .replace(/[—–]/g,'-')                 // em dash → 마이너스
+    .replace(/Ｌ/g,'1');                  // 전각 L → 1
+
+  // (N) / (0N) 형태 → 원문자
+  t = t.replace(/\(0?([1-5])\)/g, (_,n)=>C[n]);
+  // (9) / (09) → ④  (4가 9로 오인식)
+  t = t.replace(/\(0?9\)/g,'④');
+  // 0N) / N) 단독 → 원문자  (예: 09) → ④, 03) → ③)
+  t = t.replace(/\b0([1-5])\)/g, (_,n)=>C[n]);
+  t = t.replace(/\b09\)/g,'④');
+  // (N 닫힘괄호 없음 → 원문자  (예: "(2 " → "② ")
+  t = t.replace(/\(0?([1-5])(?=\s|$)/gm, (_,n)=>C[n]);
+  t = t.replace(/\(0?9(?=\s|$)/gm,'④');
+  // 다양한 유니코드 원문자 통일
+  t = t.replace(/[➀❶]/g,'①').replace(/[➁❷]/g,'②').replace(/[➂❸]/g,'③')
+       .replace(/[➃❹]/g,'④').replace(/[➄❺]/g,'⑤');
+  // 정답 정규화
+  t = t.replace(/정\s+답/g,'정답').replace(/\[\s*정답\s*\]/g,'[정답]')
+       .replace(/[ \t]+\n/g,'\n');
+  return t;
+}
+
+// ── 분수 고아 줄 복원 (스택 분수: 분자 줄 + 분모 줄 합체) ──
+function mergeFractionOrphans(text) {
+  const lines = text.split('\n');
+  const out   = [];
+  // 고아 줄: 숫자와 공백만으로 구성, 문제번호+답 패턴 없음
+  const isOrphan = l => /^[\d\s]+$/.test(l.trim()) && l.trim().length > 0
+                     && !/\b\d{1,3}\s+\S/.test(l);
+  const hasQPair = l => /\b\d{1,3}\s+\S/.test(l);
+
+  for (let i = 0; i < lines.length; i++) {
+    const cur  = lines[i];
+    const next = (lines[i+1]||'').trimEnd();
+
+    if (hasQPair(cur) && isOrphan(next)) {
+      // 고아 줄의 숫자를 앞 줄의 숫자 답(분자)에 분모로 붙임
+      const denoms = next.trim().split(/\s{2,}/).map(s=>s.trim()).filter(Boolean);
+      let di = 0;
+      // 앞 줄에서 한글 섞인 숫자(분자가 깨진 형태) 또는 긴 숫자 찾아 교체
+      const fixed = cur.replace(
+        /(\b\d{1,3}\s+)([가-힣ㄱ-ㅎ]*\d{1,6}[가-힣ㄱ-ㅎ]*)(?=\s{2,}|\s*$)/g,
+        (m, qpart, ans) => {
+          if (di < denoms.length) {
+            const num = ans.replace(/[가-힣ㄱ-ㅎ]/g,'').trim();
+            return qpart + (num||ans) + '/' + denoms[di++];
+          }
+          return m;
+        }
+      );
+      out.push(fixed);
+      i++; // 고아 줄 스킵
+    } else {
+      out.push(cur);
     }
+  }
+  return out.join('\n');
+}
 
-    // Pattern: "0631 ②" or "0631 ○" or "0631 ×" (inline multiple on one line)
-    const p2 = t.matchAll(/\b(\d+)\s+([①②③④⑤○×])/g);
-    for (const m of p2) {
-      const num = parseInt(m[1]);
-      const sym = m[2];
-      if (num > 0) {
-        if (sym==='○') addQ(results, num, 'O', circled);
-        else if (sym==='×') addQ(results, num, 'X', circled);
-        else addQ(results, num, sym, circled);
-      }
-    }
+function parseAnswerSheet(text) {
+  const CIRCLE = {'①':'1','②':'2','③':'3','④':'4','⑤':'5'};
 
-    // Pattern: "1) ④" or "1. ③"
-    const p3 = t.match(/^(\d+)[).]\s*([①②③④⑤1-5])\s*$/);
-    if (p3) {
-      const num = parseInt(p3[1]);
-      if (num > 0) addQ(results, num, p3[2], circled);
+  const res = {};
+  const add = (num, raw) => {
+    num = +num;
+    if (!num || num > 300 || res[num]) return;
+    raw = (raw||'').trim().replace(/^[\[\]]+|[\[\]]+$/g,'').trim();
+    if (!raw) return;
+    // 원문자(①②③④⑤)만 객관식, 나머지는 모두 주관식
+    if (CIRCLE[raw]) { res[num]={number:num,type:'multiple',answer:CIRCLE[raw]}; return; }
+    res[num] = { number:num, type:'short', answer: raw };
+  };
+
+  const t = normalizeOCR(text.replace(/\r/g,''));
+
+  // ─── 우선순위 높은 패턴부터 ───
+
+  // [PDF2] "1) [정답] ⑤"  "1)[정답] 25"  "1) [정답] ㄱ,ㄴ"
+  for (const m of t.matchAll(/(\d+)\s*[)）]\s*\[정답\]\s*([^\n]{1,40})/g)) {
+    const ans = m[2].trim().split(/\s{2,}/)[0].trim(); // 공백 2개 이상 전까지
+    if (ans) add(m[1], ans);
+  }
+
+  // ─── 라인 단위 처리 (가로/세로 레이아웃 모두) ───
+  for (const line of t.split('\n')) {
+    const ln = line.trim();
+    if (!ln) continue;
+
+    // [PDF3 / 세로형] 한 줄에 "번호 답" 쌍이 1~여러 개
+    // 답의 종류: 원문자 | 단독숫자(정수/분수/음수) | 한글(ㄱㄴㄷ포함)
+    const ANS_TOKEN = '(?:[①②③④⑤]|[1-9]\\d{0,5}(?:\\/[1-9]\\d{0,5})?|-\\d{1,6}|\\d+(?:\\.\\d+)?|[가-힣ㄱ-ㅎ]{1,10})';
+    const pairRe = new RegExp('\\b(0?[1-9]\\d?|[1-9]\\d{1,2})\\s+(' + ANS_TOKEN + ')(?=\\s{2,}|\\s*$|\\s+\\d)', 'g');
+    for (const m of ln.matchAll(pairRe))
+      add(m[1], m[2]);
+
+    // [가로 표 형식] "01 3  02 ④  03 ①" — 공백 두 칸 이상으로 셀 구분
+    const cells = ln.split(/\s{2,}/);
+    for (const cell of cells) {
+      const c = cell.trim();
+      const cm = c.match(/^(0?[1-9]\d?)\s+(.+)$/) || c.match(/^([1-9]\d{0,2})\s+(.+)$/);
+      if (cm) add(cm[1], cm[2].trim());
     }
   }
 
-  const qs = Object.values(results).sort((a,b)=>a.number-b.number);
-  return qs;
-}
+  // [공통] 원문자가 있는 모든 "N(구분자?)①" 패턴
+  for (const m of t.matchAll(/(\d+)\s*[.)）]?\s*([①②③④⑤])/g))
+    add(m[1], m[2]);
 
-function addQ(results, num, raw, circled) {
-  if (results[num]) return; // first occurrence wins
-  let type, answer;
-  if (circled[raw]) { type='multiple'; answer=circled[raw]; }
-  else if (/^[1-5]$/.test(raw)) { type='multiple'; answer=raw; }
-  else { type='short'; answer=raw; }
-  results[num] = {number:num, type, answer};
+  // [워크북 PDF1] 4자리 코드 "0631 ②"  "0612 ○"
+  for (const m of t.matchAll(/\b(\d{4})\s+([①②③④⑤○×])/g)) {
+    const sym = m[2]==='○'?'O': m[2]==='×'?'X': CIRCLE[m[2]]||m[2];
+    add(m[1], sym);
+  }
+
+  return Object.values(res).sort((a,b)=>a.number-b.number);
 }
 
 function parseRange(rangeText, allQs) {
-  if (!rangeText || !rangeText.trim() || rangeText.trim()==='전체') return allQs;
+  if (!rangeText.trim() || rangeText.trim()==='전체') return allQs;
   const nums = new Set();
-  for (const part of rangeText.split(',').map(p=>p.trim()).filter(Boolean)) {
-    if (part.includes('-')) {
-      const [s,e] = part.split('-').map(n=>parseInt(n.trim()));
-      if (isNaN(s)||isNaN(e)) throw new Error(`잘못된 범위: ${part}`);
-      if (s>e) throw new Error(`시작이 끝보다 큽니다: ${part}`);
-      for (let i=s;i<=e;i++) nums.add(i);
+  for (const p of rangeText.split(',').map(s=>s.trim()).filter(Boolean)) {
+    if (p.includes('-')) {
+      const [a,b] = p.split('-').map(Number);
+      if (isNaN(a)||isNaN(b)||a>b) throw new Error('잘못된 범위: '+p);
+      for (let i=a;i<=b;i++) nums.add(i);
     } else {
-      const n = parseInt(part);
-      if (isNaN(n)) throw new Error(`잘못된 번호: ${part}`);
+      const n=Number(p); if(isNaN(n)) throw new Error('잘못된 번호: '+p);
       nums.add(n);
     }
   }
@@ -127,82 +355,107 @@ function parseRange(rangeText, allQs) {
 }
 
 function genCode(existing) {
-  let code, tries=0;
-  do { code=String(Math.floor(1000+Math.random()*9000)); tries++; }
-  while (existing.has(code) && tries<200);
-  return code;
+  let c,t=0;
+  do { c=String(Math.floor(1000+Math.random()*9000)); t++; } while(existing.has(c)&&t<300);
+  return c;
+}
+function allExistingCodes(ts, ss) {
+  return new Set([ADMIN_CODE,...ts.map(t=>t.loginCode),...ss.map(s=>s.loginCode)]);
 }
 
-function allCodes(teachers, students) {
-  return new Set([ADMIN_CODE, ...teachers.map(t=>t.loginCode), ...students.map(s=>s.loginCode)]);
-}
-
-// ===== RESULT GRID =====
+// ── 공통 컴포넌트 ──
 function ResultGrid({details}) {
   return (
     <div className="grid grid-cols-10 gap-1">
-      {Object.entries(details).sort(([a],[b])=>Number(a)-Number(b)).map(([num,d])=>(
-        <div key={num} className="flex flex-col items-center">
-          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
-            d.status==='correct'?'bg-green-100 text-green-600':d.status==='wrong'?'bg-red-100 text-red-500':'bg-gray-100 text-gray-400'
-          }`}>{d.status==='correct'?'○':d.status==='wrong'?'✗':'?'}</div>
-          <div className="text-gray-400 mt-0.5" style={{fontSize:'9px'}}>{num}</div>
+      {Object.entries(details).sort(([a],[b])=>+a-+b).map(([n,d])=>(
+        <div key={n} className="flex flex-col items-center">
+          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold
+            ${d.status==='correct'?'bg-green-100 text-green-600':d.status==='wrong'?'bg-red-100 text-red-500':'bg-gray-100 text-gray-400'}`}>
+            {d.status==='correct'?'○':d.status==='wrong'?'✗':'?'}
+          </div>
+          <span className="text-gray-400 mt-0.5" style={{fontSize:'9px'}}>{n}</span>
         </div>
       ))}
     </div>
   );
 }
 
-// ===== MATH INPUT =====
-const MATH_ROWS = [
-  ['√','∛','²','³','π','∞','±','×','÷'],
-  ['≤','≥','≠','∈','∉','⊂','⊃','∪','∩'],
-  ['①','②','③','④','⑤','ㄱ','ㄴ','ㄷ','ㄹ'],
+const LATEX_SYMBOLS = [
+  {label:'\\frac{}{}', insert:'\\frac{}{}', cursorBack:3},
+  {label:'\\sqrt{}',   insert:'\\sqrt{}',   cursorBack:1},
+  {label:'^',          insert:'^',           cursorBack:0},
+  {label:'\\pi',       insert:'\\pi',        cursorBack:0},
+  {label:'\\infty',    insert:'\\infty',     cursorBack:0},
+  {label:'±',          insert:'±',           cursorBack:0},
+  {label:'-',          insert:'-',           cursorBack:0},
 ];
 
 function MathInput({value, onChange}) {
-  const ref = useRef(null);
-  const insert = (sym) => {
-    const el = ref.current;
-    if (!el) { onChange(value+sym); return; }
-    const s = el.selectionStart, e = el.selectionEnd;
-    const nv = value.slice(0,s)+sym+value.slice(e);
-    onChange(nv);
-    setTimeout(()=>{ el.selectionStart=el.selectionEnd=s+sym.length; el.focus(); },0);
+  const inputRef = React.useRef(null);
+
+  const insertAtCursor = (sym, cursorBack) => {
+    const el = inputRef.current;
+    if (!el) { onChange(value + sym); return; }
+    const start = el.selectionStart;
+    const end   = el.selectionEnd;
+    const newVal = value.slice(0, start) + sym + value.slice(end);
+    onChange(newVal);
+    // 커서 위치 복원 (다음 tick에)
+    setTimeout(() => {
+      const pos = start + sym.length - (cursorBack || 0);
+      el.setSelectionRange(pos, pos);
+      el.focus();
+    }, 0);
   };
-  const handleKeyUp = () => {
-    let v = value;
-    const rep = [[/\^2/g,'²'],[/\^3/g,'³'],[/sqrt/g,'√'],[/\bpi\b/g,'π'],[/<=/g,'≤'],[/>=/g,'≥'],[/!=/g,'≠'],[/\binf\b/g,'∞']];
-    for (const [p,r] of rep) v=v.replace(p,r);
-    if (v!==value) onChange(v);
-  };
+
+  const preview = renderLatex(value);
+
   return (
     <div>
-      <textarea ref={ref} value={value} onChange={e=>onChange(e.target.value)} onKeyUp={handleKeyUp}
-        placeholder="답안을 입력하세요..." rows={2}
-        className="w-full border-2 border-gray-200 rounded-xl p-3 focus:outline-none focus:border-blue-500 resize-none text-sm"/>
-      <div className="mt-1 border rounded-xl p-2 bg-gray-50">
-        {MATH_ROWS.map((row,ri)=>(
-          <div key={ri} className="flex flex-wrap gap-1 mb-1">
-            {row.map(sym=>(
-              <button key={sym} type="button" onClick={()=>insert(sym)}
-                className="px-2 py-1 bg-white border border-gray-200 rounded text-sm hover:bg-blue-50 hover:border-blue-300 font-mono min-w-[2rem]">
-                {sym}
-              </button>
-            ))}
-          </div>
+      {/* 심볼 버튼 행 */}
+      <div className="flex gap-1 flex-wrap mb-1">
+        {LATEX_SYMBOLS.map(({label, insert, cursorBack})=>(
+          <button key={label} type="button"
+            onClick={()=>insertAtCursor(insert, cursorBack)}
+            className="px-2 py-1 bg-white border border-gray-300 rounded text-xs hover:bg-blue-50 font-mono text-gray-700">
+            {label}
+          </button>
         ))}
       </div>
-      <p className="text-xs text-gray-400 mt-1">단축키: ^2→² | sqrt→√ | pi→π | &lt;=→≤ | !=→≠ | inf→∞</p>
+      {/* 텍스트 입력 */}
+      <input ref={inputRef} type="text" value={value}
+        onChange={e=>onChange(e.target.value)}
+        placeholder="답안 입력 (LaTeX 또는 일반 텍스트)..."
+        className="w-full border-2 border-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono focus:outline-none focus:border-blue-500"/>
+      {/* KaTeX 미리보기 */}
+      {value && (
+        <div className="mt-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-sm min-h-8"
+          dangerouslySetInnerHTML={{__html: preview}}/>
+      )}
     </div>
   );
 }
 
-// ===== EDIT TEACHER FORM =====
+// ── 파일 선택 버튼 (핵심: 투명 input을 버튼 위에 올림) ──
+function FilePickerButton({onFile, loading}) {
+  if (loading) return <p className="text-blue-500 text-sm py-2">📄 PDF 읽는 중...</p>;
+  return (
+    <div className="file-btn-wrap">
+      <button type="button"
+        className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2.5 rounded-xl text-sm font-semibold pointer-events-none">
+        📂 PDF 파일 선택
+      </button>
+      <input type="file" accept=".pdf"
+        onChange={e => { if(e.target.files&&e.target.files[0]) onFile(e.target.files[0]); e.target.value=''; }}/>
+    </div>
+  );
+}
+
+// ── 선생님 수정 폼 ──
 function EditTeacherForm({teacher, allTeachers, allStudents, onSave, onCancel}) {
   const [name, setName] = useState(teacher.name);
   const [code, setCode] = useState(teacher.loginCode);
-  const [err, setErr] = useState('');
+  const [err,  setErr]  = useState('');
   const save = () => {
     if (!name.trim()) { setErr('이름을 입력하세요.'); return; }
     if (!/^\d{4}$/.test(code)) { setErr('4자리 숫자여야 합니다.'); return; }
@@ -210,10 +463,10 @@ function EditTeacherForm({teacher, allTeachers, allStudents, onSave, onCancel}) 
       ...allTeachers.filter(t=>t.id!==teacher.id).map(t=>t.loginCode),
       ...allStudents.map(s=>s.loginCode)]);
     if (others.has(code)) { setErr('이미 사용 중인 코드입니다.'); return; }
-    onSave({...teacher, name:name.trim(), loginCode:code});
+    onSave({...teacher,name:name.trim(),loginCode:code});
   };
   return (
-    <div className="bg-blue-50 rounded-xl px-4 py-3 border-2 border-blue-200">
+    <div className="bg-blue-50 border-2 border-blue-200 rounded-xl px-4 py-3">
       <div className="flex gap-2 mb-2">
         <input value={name} onChange={e=>setName(e.target.value)} placeholder="이름"
           className="flex-1 border rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-blue-500"/>
@@ -229,67 +482,141 @@ function EditTeacherForm({teacher, allTeachers, allStudents, onSave, onCancel}) 
   );
 }
 
-// ===== APP =====
+// ── 학생 정보 수정 모달 ──
+function EditStudentModal({student, allTeachers, allStudents, onSave, onCancel}) {
+  const [name,   setName]   = useState(student.name);
+  const [school, setSchool] = useState(student.schoolType);
+  const [grade,  setGrade]  = useState(student.grade);
+  const [code,   setCode]   = useState(student.loginCode);
+  const [err,    setErr]    = useState('');
+  const save = () => {
+    if (!name.trim()) { setErr('이름을 입력하세요.'); return; }
+    if (!school)      { setErr('학교를 선택하세요.'); return; }
+    if (!grade)       { setErr('학년을 선택하세요.'); return; }
+    if (!/^\d{4}$/.test(code)) { setErr('로그인 코드는 4자리 숫자여야 합니다.'); return; }
+    const others = new Set([ADMIN_CODE,
+      ...allTeachers.map(t=>t.loginCode),
+      ...allStudents.filter(s=>s.id!==student.id).map(s=>s.loginCode)]);
+    if (others.has(code)) { setErr('이미 사용 중인 코드입니다.'); return; }
+    onSave({...student, name:name.trim(), schoolType:school, grade, loginCode:code});
+  };
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
+        <h2 className="font-bold text-gray-800 text-lg mb-4">학생 정보 수정</h2>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-gray-500 mb-1 block">이름</label>
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="학생 이름"
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"/>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 mb-1 block">학교</label>
+            <div className="grid grid-cols-2 gap-2">
+              {['중학교','고등학교'].map(s=>(
+                <button key={s} onClick={()=>setSchool(s)}
+                  className={`py-2 rounded-lg border-2 text-sm font-medium ${school===s?'border-blue-500 bg-blue-50 text-blue-600':'border-gray-200 text-gray-600'}`}>{s}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 mb-1 block">학년</label>
+            <div className="grid grid-cols-3 gap-2">
+              {['1','2','3'].map(g=>(
+                <button key={g} onClick={()=>setGrade(g)}
+                  className={`py-2 rounded-lg border-2 text-sm font-medium ${grade===g?'border-blue-500 bg-blue-50 text-blue-600':'border-gray-200 text-gray-600'}`}>{g}학년</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 mb-1 block">로그인 코드 (4자리)</label>
+            <input value={code} onChange={e=>setCode(e.target.value)} placeholder="4자리 숫자" maxLength={4}
+              className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500"/>
+          </div>
+          {err && <p className="text-red-500 text-xs">{err}</p>}
+          <div className="flex gap-2 pt-1">
+            <button onClick={onCancel} className="flex-1 py-2 border-2 border-gray-200 text-gray-600 rounded-xl text-sm">취소</button>
+            <button onClick={save} className="flex-1 py-2 bg-blue-500 text-white rounded-xl text-sm font-semibold">저장</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════
+//  메인 앱
+// ═══════════════════════════════════════════
 function App() {
-  // ---- STATE ----
-  const [view, setView] = useState('login');
-  const [loginType, setLoginType] = useState('');
-  const [loginName, setLoginName] = useState('');
-  const [loginCode, setLoginCode] = useState('');
-  const [loginErr, setLoginErr] = useState('');
-  const [me, setMe] = useState(null);
 
-  const [teachers, setTeachers] = useState(INIT_TEACHERS);
-  const [classes, setClasses] = useState(INIT_CLASSES);
-  const [students, setStudents] = useState(INIT_STUDENTS);
-  const [homeworks, setHomeworks] = useState(INIT_HOMEWORKS);
-  const [submissions, setSubmissions] = useState([]);
+  // ── 인증 ──
+  const [view,       setView]      = useState('login');
+  const [loginType,  setLoginType] = useState('');
+  const [loginName,  setLoginName] = useState('');
+  const [loginCode,  setLoginCode] = useState('');
+  const [loginErr,   setLoginErr]  = useState('');
+  const [me,         setMe]        = useState(null);
 
-  // student solve
-  const [selHW, setSelHW] = useState(null);
-  const [answers, setAnswers] = useState({});
-  const [curResult, setCurResult] = useState(null);
+  // ── 데이터 ──
+  const [teachers,   setTeachers]  = useState(INIT_TEACHERS);
+  const [classes,    setClasses]   = useState(INIT_CLASSES);
+  const [students,   setStudents]  = useState(INIT_STUDENTS);
+  const [homeworks,  setHomeworks] = useState(INIT_HOMEWORKS);
+  const [subs,       setSubs]      = useState([]);
 
-  // teacher
-  const [tTab, setTTab] = useState('classes');
-  const [selClass, setSelClass] = useState(null);
-  const [tSubView, setTSubView] = useState('');
-  // add student form
-  const [nsName, setNsName] = useState('');
+  // ── 학생 풀기 ──
+  const [selHW,    setSelHW]    = useState(null);
+  const [answers,  setAnswers]  = useState({});
+  const [result,   setResult]   = useState(null);
+
+  // ── 선생님 탭/상태 ──
+  const [tTab,     setTTab]     = useState('classes');
+  const [selCls,   setSelCls]   = useState(null);
+  const [tSub,     setTSub]     = useState('');
+
+  // 학생 추가
+  const [nsName,   setNsName]   = useState('');
   const [nsSchool, setNsSchool] = useState('');
-  const [nsGrade, setNsGrade] = useState('');
-  const [nsMode, setNsMode] = useState('auto');
+  const [nsGrade,  setNsGrade]  = useState('');
+  const [nsMode,   setNsMode]   = useState('auto');
   const [nsManual, setNsManual] = useState('');
-  const [nsErr, setNsErr] = useState('');
-  // add class
-  const [newCls, setNewCls] = useState('');
-  const [clsErr, setClsErr] = useState('');
-  // homework creation
-  const [hwTitle, setHwTitle] = useState('');
-  const [hwMethod, setHwMethod] = useState('quick');
-  const [hwPaste, setHwPaste] = useState('');
-  const [hwParsed, setHwParsed] = useState(null);
-  const [hwWarns, setHwWarns] = useState([]);
-  const [hwRange, setHwRange] = useState('');
-  const [hwRangeErr, setHwRangeErr] = useState('');
-  const [hwFiltered, setHwFiltered] = useState(null);
-  const [hwStep, setHwStep] = useState(1);
-  const [hwManualQs, setHwManualQs] = useState([]);
-  const [hwManualCnt, setHwManualCnt] = useState(25);
-  const [hwErr, setHwErr] = useState('');
-  const [isDrag, setIsDrag] = useState(false);
-  const [pdfLoad, setPdfLoad] = useState(false);
+  const [nsErr,    setNsErr]    = useState('');
 
-  // admin
-  const [aTab, setATab] = useState('teachers');
-  const [editT, setEditT] = useState(null);
-  const [newTName, setNewTName] = useState('');
-  const [newTMode, setNewTMode] = useState('auto');
-  const [newTManual, setNewTManual] = useState('');
-  const [newTErr, setNewTErr] = useState('');
+  // 클래스 추가
+  const [newCls,   setNewCls]   = useState('');
+  const [clsErr,   setClsErr]   = useState('');
+
+  // 숙제 생성
+  const [hwTitle,      setHwTitle]     = useState('');
+  const [hwMethod,     setHwMethod]    = useState('quick');
+  const [hwPaste,      setHwPaste]     = useState('');
+  const [hwParsed,     setHwParsed]    = useState(null);
+  const [hwWarns,      setHwWarns]     = useState([]);
+  const [hwRange,      setHwRange]     = useState('');
+  const [hwRangeErr,   setHwRangeErr]  = useState('');
+  const [hwFiltered,   setHwFiltered]  = useState(null);
+  const [hwStep,       setHwStep]      = useState(1);
+  const [hwManualQs,   setHwManualQs]  = useState([]);
+  const [hwManualCnt,  setHwManualCnt] = useState(25);
+  const [hwErr,        setHwErr]       = useState('');
+  const [pdfLoading,   setPdfLoading]  = useState(false);
+  const [isDrag,       setIsDrag]      = useState(false);
+
+  // 학생 수정 모달
+  const [editStudent, setEditStudent] = useState(null);
+
+  // 관리자
+  const [aTab,    setATab]    = useState('teachers');
+  const [editT,   setEditT]   = useState(null);
   const [detailT, setDetailT] = useState(null);
+  const [newTName,   setNewTName]   = useState('');
+  const [newTMode,   setNewTMode]   = useState('auto');
+  const [newTManual, setNewTManual] = useState('');
+  const [newTErr,    setNewTErr]    = useState('');
 
-  // ---- AUTH ----
+  // ────────────────────────────────────────
+  //  로그인
+  // ────────────────────────────────────────
   const doLogin = () => {
     setLoginErr('');
     const code = loginCode.trim();
@@ -299,79 +626,78 @@ function App() {
       if (!code) { setLoginErr('⚠️ 코드를 입력하세요.'); return; }
       const t = teachers.find(t=>t.loginCode===code);
       if (!t) { setLoginErr('❌ 존재하지 않는 로그인 코드입니다.'); return; }
-      setMe({role:'teacher', data:t}); setView('teacher'); setTTab('classes'); return;
+      setMe({role:'teacher',data:t}); setView('teacher'); setTTab('classes'); return;
     }
-    if (loginType === 'student') {
-      const name = loginName.trim();
-      if (!name || !code) { setLoginErr('⚠️ 모든 항목을 입력해주세요.'); return; }
-      const codeExists = students.some(s=>s.loginCode===code);
-      const st = students.find(s=>s.name===name && s.loginCode===code);
-      if (!st) {
-        setLoginErr(codeExists ? '❌ 이름과 로그인 코드가 일치하지 않습니다.' : '❌ 존재하지 않는 로그인 코드입니다.');
-        return;
-      }
-      setMe({role:'student', data:st}); setView('student'); return;
-    }
+    const name = loginName.trim();
+    if (!name||!code) { setLoginErr('⚠️ 모든 항목을 입력해주세요.'); return; }
+    const codeExists = students.some(s=>s.loginCode===code);
+    const st = students.find(s=>s.name===name&&s.loginCode===code);
+    if (!st) { setLoginErr(codeExists?'❌ 이름과 코드가 일치하지 않습니다.':'❌ 존재하지 않는 로그인 코드입니다.'); return; }
+    setMe({role:'student',data:st}); setView('student');
   };
 
   const doLogout = () => {
     setMe(null); setView('login'); setLoginType(''); setLoginName(''); setLoginCode(''); setLoginErr('');
-    setSelClass(null); setTSubView(''); setCurResult(null); setSelHW(null);
+    setSelCls(null); setTSub(''); setResult(null); setSelHW(null);
   };
 
-  // ---- STUDENT ----
-  const getMyHWs = () => {
-    if (!me?.data) return [];
-    const cls = classes.find(c=>c.id===me.data.classId);
-    if (!cls) return [];
-    return homeworks.filter(h=>cls.homeworkIds.includes(h.id));
+  // ────────────────────────────────────────
+  //  학생
+  // ────────────────────────────────────────
+  const myHWs = () => {
+    const cls = classes.find(c=>c.id===me?.data?.classId);
+    return cls ? homeworks.filter(h=>cls.homeworkIds.includes(h.id)) : [];
   };
-  const getMySub = (hwId) => submissions.find(s=>s.studentId===me?.data?.id && s.homeworkId===hwId);
+  const getMySub = (hwId) => subs.find(s=>s.studentId===me?.data?.id&&s.homeworkId===hwId);
 
   const selectHW = (hw) => {
     const sub = getMySub(hw.id);
-    if (sub) { setCurResult(sub); setView('results'); return; }
+    if (sub) { setResult(sub); setView('results'); return; }
     setSelHW(hw); setAnswers({}); setView('solve');
   };
 
   const submitHW = () => {
-    if (!selHW || !me?.data) return;
+    if (!selHW||!me?.data) return;
     const now = new Date();
-    const details = {}; let correct=0,wrong=0,unanswered=0;
+    const details = {}; let ok=0,ng=0,sk=0;
     for (const q of selHW.questions) {
       const ua = answers[q.number]||null;
       let status;
-      if (!ua||ua.trim()==='') { status='unanswered'; unanswered++; }
-      else if (q.type==='multiple') { status=ua===q.answer?'correct':'wrong'; status==='correct'?correct++:wrong++; }
-      else { status=ua.trim()===q.answer.trim()?'correct':'wrong'; status==='correct'?correct++:wrong++; }
+      if (!ua||ua.trim()==='') { status='unanswered'; sk++; }
+      else if (q.type==='multiple') { status=ua===q.answer?'correct':'wrong'; status==='correct'?ok++:ng++; }
+      else { status=ua.trim()===q.answer.trim()?'correct':'wrong'; status==='correct'?ok++:ng++; }
       details[q.number]={type:q.type,userAnswer:ua,correctAnswer:q.answer,status};
     }
     const sub={
       id:now.getTime(), studentId:me.data.id, studentName:me.data.name,
       homeworkId:selHW.id, homework:selHW.title,
-      correctCount:correct, wrongCount:wrong, unansweredCount:unanswered, details,
+      correctCount:ok, wrongCount:ng, unansweredCount:sk, details,
       date:`${now.getFullYear()}.${now.getMonth()+1}.${now.getDate()}`,
       time:`${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`,
     };
-    setSubmissions(p=>[...p,sub]); setCurResult(sub); setView('results');
+    setSubs(p=>[...p,sub]); setResult(sub); setView('results');
   };
 
-  // ---- TEACHER - Classes ----
-  const addClassFn = () => {
+  // ────────────────────────────────────────
+  //  선생님 - 클래스
+  // ────────────────────────────────────────
+  const addClass = () => {
     setClsErr('');
-    if (!newCls.trim()) { setClsErr('클래스 이름을 입력하세요.'); return; }
-    const nc = {id:`c_${Date.now()}`, name:newCls.trim(), teacherId:me.data.id, studentIds:[], homeworkIds:[]};
+    if (!newCls.trim()) { setClsErr('이름을 입력하세요.'); return; }
+    const nc = {id:`c_${Date.now()}`,name:newCls.trim(),teacherId:me.data.id,studentIds:[],homeworkIds:[]};
     setClasses(p=>[...p,nc]);
     setTeachers(p=>p.map(t=>t.id===me.data.id?{...t,classIds:[...t.classIds,nc.id]}:t));
     setMe(u=>({...u,data:{...u.data,classIds:[...u.data.classIds,nc.id]}}));
-    setNewCls(''); setTSubView('');
+    setNewCls(''); setTSub('');
   };
 
-  // ---- TEACHER - Students ----
-  const addStudentFn = () => {
+  // ────────────────────────────────────────
+  //  선생님 - 학생
+  // ────────────────────────────────────────
+  const addStudent = () => {
     setNsErr('');
     if (!nsName.trim()||!nsSchool||!nsGrade) { setNsErr('모든 항목을 입력하세요.'); return; }
-    const codes = allCodes(teachers, students);
+    const codes = allExistingCodes(teachers, students);
     let code;
     if (nsMode==='auto') { code=genCode(codes); }
     else {
@@ -379,82 +705,92 @@ function App() {
       if (!/^\d{4}$/.test(code)) { setNsErr('4자리 숫자여야 합니다.'); return; }
       if (codes.has(code)) { setNsErr('이미 사용 중인 코드입니다.'); return; }
     }
-    const ns={id:`s_${Date.now()}`,name:nsName.trim(),schoolType:nsSchool,grade:nsGrade,loginCode:code,classId:selClass.id};
+    const ns={id:`s_${Date.now()}`,name:nsName.trim(),schoolType:nsSchool,grade:nsGrade,loginCode:code,classId:selCls.id};
     setStudents(p=>[...p,ns]);
-    setClasses(p=>p.map(c=>c.id===selClass.id?{...c,studentIds:[...c.studentIds,ns.id]}:c));
-    setSelClass(c=>({...c,studentIds:[...c.studentIds,ns.id]}));
+    setClasses(p=>p.map(c=>c.id===selCls.id?{...c,studentIds:[...c.studentIds,ns.id]}:c));
+    setSelCls(c=>({...c,studentIds:[...c.studentIds,ns.id]}));
     setNsName(''); setNsSchool(''); setNsGrade(''); setNsManual('');
   };
-
   const delStudent = (sid) => {
     setStudents(p=>p.filter(s=>s.id!==sid));
-    setClasses(p=>p.map(c=>({...c,studentIds:c.studentIds.filter(id=>id!==sid)})));
-    if (selClass) setSelClass(c=>({...c,studentIds:c.studentIds.filter(id=>id!==sid)}));
+    setClasses(p=>p.map(c=>({...c,studentIds:c.studentIds.filter(i=>i!==sid)})));
+    if (selCls) setSelCls(c=>({...c,studentIds:c.studentIds.filter(i=>i!==sid)}));
+  };
+  const saveStudentEdit = (updated) => {
+    setStudents(p=>p.map(s=>s.id===updated.id?updated:s));
+    setEditStudent(null);
   };
 
-  // ---- PDF ----
-  const readPDF = async (file) => {
-    if (!file||file.type!=='application/pdf') { setHwErr('PDF 파일만 가능합니다.'); return; }
-    setPdfLoad(true); setHwErr('');
+  // ────────────────────────────────────────
+  //  선생님 - 숙제 생성
+  // ────────────────────────────────────────
+  const resetHW = () => {
+    setHwTitle(''); setHwPaste(''); setHwParsed(null); setHwWarns([]);
+    setHwFiltered(null); setHwRange(''); setHwStep(1); setHwManualQs([]); setHwErr('');
+  };
+
+  const handlePDFFile = async (file) => {
+    setPdfLoading(true); setHwErr('');
     try {
-      const buf = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({data:buf}).promise;
-      let text='';
-      for (let i=1;i<=pdf.numPages;i++) {
-        const page=await pdf.getPage(i);
-        const content=await page.getTextContent();
-        text+=content.items.map(it=>it.str).join(' ')+'\n';
-      }
+      const text = await extractPDFText(file, (msg) => setHwErr('🔄 ' + msg));
       setHwPaste(text);
-    } catch(e) { setHwErr('PDF 읽기 실패: '+e.message); }
-    setPdfLoad(false);
+      const lines = text.split('\n').filter(l=>l.trim()).length;
+      setHwErr('✅ PDF 읽기 성공! (' + lines + '줄 추출됨) 아래 텍스트를 확인하고 파싱하세요.');
+    } catch(e) {
+      setHwErr('❌ PDF 오류: ' + e.message);
+      console.error('PDF 오류:', e);
+    }
+    setPdfLoading(false);
   };
 
-  const handleDrop = useCallback(async(e)=>{
-    e.preventDefault(); setIsDrag(false);
-    await readPDF(e.dataTransfer.files[0]);
-  },[]);
-
-  // ---- TEACHER - Homework ----
   const parseFn = () => {
     const qs = parseAnswerSheet(hwPaste);
-    const warns=[];
-    const empty=qs.filter(q=>!q.answer);
-    if (empty.length>0) warns.push(`답안 누락: ${empty.map(q=>q.number+'번').join(', ')} (${empty.length}개)`);
-    const nums=qs.map(q=>q.number);
-    const dupes=nums.filter((n,i)=>nums.indexOf(n)!==i);
-    if (dupes.length>0) warns.push(`중복 번호: ${[...new Set(dupes)].join(', ')}`);
+    if (qs.length === 0) {
+      const sample = hwPaste.trim().split('\n').slice(0,3).join(' / ');
+      setHwErr(`❌ 파싱 실패: 답안을 인식하지 못했습니다.\n추출된 텍스트 샘플: "${sample}"\n\n지원 형식: "1) ④"  "1. ②"  "1 ③"  "1)[정답]④"`);
+      return;
+    }
+    const warns = [];
+    const empty = qs.filter(q=>!q.answer);
+    if (empty.length) warns.push(`답안 누락: ${empty.map(q=>q.number+'번').join(', ')}`);
+    const nums = qs.map(q=>q.number);
+    const dupes = [...new Set(nums.filter((n,i)=>nums.indexOf(n)!==i))];
+    if (dupes.length) warns.push(`중복 번호: ${dupes.join(', ')}`);
+    setHwErr('');
     setHwParsed(qs); setHwWarns(warns); setHwStep(2);
   };
 
   const applyRange = () => {
     setHwRangeErr('');
-    try { const f=parseRange(hwRange,hwParsed); setHwFiltered(f); setHwStep(3); }
+    try { setHwFiltered(parseRange(hwRange, hwParsed)); setHwStep(3); }
     catch(e) { setHwRangeErr(e.message); }
   };
 
   const saveHW = (qs) => {
-    if (!hwTitle.trim()||!selClass||qs.length===0) { setHwErr('제목과 문항을 확인하세요.'); return; }
-    const nhw={id:`hw_${Date.now()}`,title:hwTitle.trim(),classId:selClass.id,questions:qs};
-    setHomeworks(p=>[...p,nhw]);
-    setClasses(p=>p.map(c=>c.id===selClass.id?{...c,homeworkIds:[...c.homeworkIds,nhw.id]}:c));
-    setSelClass(c=>({...c,homeworkIds:[...c.homeworkIds,nhw.id]}));
-    setHwTitle(''); setHwPaste(''); setHwParsed(null); setHwWarns([]);
-    setHwFiltered(null); setHwRange(''); setHwStep(1); setHwManualQs([]);
-    setTSubView('');
+    if (!hwTitle.trim()) { setHwErr('❌ 제목을 먼저 입력하세요.'); return; }
+    if (!selCls)         { setHwErr('❌ 클래스가 선택되지 않았습니다.'); return; }
+    if (!qs||!qs.length) { setHwErr('❌ 문항을 먼저 생성하세요.'); return; }
+    try {
+      const nhw = {id:`hw_${Date.now()}`,title:hwTitle.trim(),classId:selCls.id,questions:qs};
+      setHomeworks(p=>[...p,nhw]);
+      setClasses(p=>p.map(c=>c.id===selCls.id?{...c,homeworkIds:[...(c.homeworkIds||[]),nhw.id]}:c));
+      setSelCls(c=>({...c,homeworkIds:[...(c.homeworkIds||[]),nhw.id]}));
+      resetHW(); setTSub('');
+    } catch(e) { setHwErr('❌ 저장 오류: '+e.message); console.error('saveHW error',e); }
   };
-
   const delHW = (hwId) => {
     setHomeworks(p=>p.filter(h=>h.id!==hwId));
-    setClasses(p=>p.map(c=>({...c,homeworkIds:c.homeworkIds.filter(id=>id!==hwId)})));
-    if (selClass) setSelClass(c=>({...c,homeworkIds:c.homeworkIds.filter(id=>id!==hwId)}));
+    setClasses(p=>p.map(c=>({...c,homeworkIds:c.homeworkIds.filter(i=>i!==hwId)})));
+    if (selCls) setSelCls(c=>({...c,homeworkIds:c.homeworkIds.filter(i=>i!==hwId)}));
   };
 
-  // ---- ADMIN - Teachers ----
+  // ────────────────────────────────────────
+  //  관리자 - 선생님
+  // ────────────────────────────────────────
   const addTeacher = () => {
     setNewTErr('');
     if (!newTName.trim()) { setNewTErr('이름을 입력하세요.'); return; }
-    const codes = allCodes(teachers, students);
+    const codes = allExistingCodes(teachers, students);
     let code;
     if (newTMode==='auto') { code=genCode(codes); }
     else {
@@ -465,10 +801,8 @@ function App() {
     setTeachers(p=>[...p,{id:`t_${Date.now()}`,name:newTName.trim(),loginCode:code,classIds:[]}]);
     setNewTName(''); setNewTManual(''); setNewTMode('auto');
   };
-
   const delTeacher = (tid) => {
-    const tClasses = classes.filter(c=>c.teacherId===tid);
-    const cIds = new Set(tClasses.map(c=>c.id));
+    const cIds = new Set(classes.filter(c=>c.teacherId===tid).map(c=>c.id));
     const sIds = new Set(students.filter(s=>cIds.has(s.classId)).map(s=>s.id));
     setTeachers(p=>p.filter(t=>t.id!==tid));
     setClasses(p=>p.filter(c=>c.teacherId!==tid));
@@ -476,54 +810,64 @@ function App() {
     setHomeworks(p=>p.filter(h=>!cIds.has(h.classId)));
   };
 
-  const updateTeacher = (t) => { setTeachers(p=>p.map(x=>x.id===t.id?t:x)); setEditT(null); };
-
-  // ---- STATS ----
+  // ────────────────────────────────────────
+  //  통계
+  // ────────────────────────────────────────
   const classStats = (classId) => {
-    const cls = classes.find(c=>c.id===classId);
-    if (!cls) return [];
-    const clsStudents = students.filter(s=>cls.studentIds.includes(s.id));
+    const cls = classes.find(c=>c.id===classId); if (!cls) return [];
+    const clsSts  = students.filter(s=>cls.studentIds.includes(s.id));
     return homeworks.filter(h=>cls.homeworkIds.includes(h.id)).map(hw=>{
-      const subs = submissions.filter(s=>s.homeworkId===hw.id);
-      const submittedIds = new Set(subs.map(s=>s.studentId));
-      const notSubmitted = clsStudents.filter(s=>!submittedIds.has(s.id));
-      const qStats={};
+      const hwSubs = subs.filter(s=>s.homeworkId===hw.id);
+      const subIds = new Set(hwSubs.map(s=>s.studentId));
+      const notSub = clsSts.filter(s=>!subIds.has(s.id));
+      const qStats = {};
       hw.questions.forEach(q=>{
-        const wrong=subs.filter(s=>{const d=s.details[q.number];return d&&(d.status==='wrong'||d.status==='unanswered');}).length;
-        qStats[q.number]={number:q.number,type:q.type,wrongCount:wrong,wrongRate:subs.length>0?Math.round(wrong/subs.length*100):0};
+        const w = hwSubs.filter(s=>{const d=s.details[q.number];return d&&d.status!=='correct';}).length;
+        qStats[q.number]={number:q.number,type:q.type,wrong:w,rate:hwSubs.length?Math.round(w/hwSubs.length*100):0};
       });
-      const top5=Object.values(qStats).sort((a,b)=>b.wrongRate-a.wrongRate).slice(0,5);
-      const avg=subs.length>0?Math.round(subs.reduce((a,s)=>a+s.correctCount,0)/subs.length):0;
-      return {hw,subs,notSubmitted,clsStudents,top5,avg};
+      const top5 = Object.values(qStats).sort((a,b)=>b.rate-a.rate).slice(0,5);
+      const avg  = hwSubs.length?Math.round(hwSubs.reduce((s,r)=>s+r.correctCount,0)/hwSubs.length):0;
+      return {hw, hwSubs, notSub, clsSts, top5, avg};
     });
   };
 
-  // ---- TEACHER CLASSES (derived) ----
-  const myClasses = () => {
-    if (!me?.data) return [];
-    return classes.filter(c=>me.data.classIds.includes(c.id));
-  };
+  const myClasses = () => classes.filter(c=>me?.data?.classIds?.includes(c.id));
 
-  // ===== RENDER =====
+  // ────────────────────────────────────────
+  //  공통 UI 헬퍼
+  // ────────────────────────────────────────
+  const Tab = ({id,label,cur,set}) => (
+    <button onClick={()=>set(id)}
+      className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors
+        ${cur===id?'border-blue-500 text-blue-600':'border-transparent text-gray-500 hover:text-gray-700'}`}>
+      {label}
+    </button>
+  );
 
-  // LOGIN
+  // ════════════════════════════════════════
+  //  렌더링
+  // ════════════════════════════════════════
+
+  // ── 로그인 ──
   if (view==='login') return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="text-4xl mb-2">📚</div>
+          <div className="flex justify-center mb-4">
+            <img src="./logo.png" alt="TheMathZm 로고" style={{maxWidth:'200px'}} className="h-auto"/>
+          </div>
           <h1 className="text-2xl font-bold text-gray-800">온라인 숙제 제출</h1>
           <p className="text-gray-400 text-sm mt-1">TheMathZm</p>
         </div>
         {!loginType ? (
           <div className="space-y-3">
-            <p className="text-sm text-gray-500 text-center">로그인 유형 선택</p>
+            <p className="text-sm text-gray-500 text-center mb-2">로그인 유형 선택</p>
             <button onClick={()=>setLoginType('student')}
-              className="w-full py-4 rounded-xl border-2 border-blue-200 text-blue-600 font-semibold hover:bg-blue-50 text-lg transition-all">
+              className="w-full py-4 rounded-xl border-2 border-blue-200 text-blue-600 font-semibold hover:bg-blue-50 text-lg">
               🧑‍🎓 학생
             </button>
             <button onClick={()=>setLoginType('teacher')}
-              className="w-full py-4 rounded-xl border-2 border-green-200 text-green-600 font-semibold hover:bg-green-50 text-lg transition-all">
+              className="w-full py-4 rounded-xl border-2 border-green-200 text-green-600 font-semibold hover:bg-green-50 text-lg">
               👨‍🏫 선생님 / 관리자
             </button>
           </div>
@@ -534,45 +878,42 @@ function App() {
             {loginType==='student' && (
               <div>
                 <label className="text-xs text-gray-500 mb-1 block">이름</label>
-                <input type="text" value={loginName} onChange={e=>setLoginName(e.target.value)} placeholder="이름 입력"
+                <input value={loginName} onChange={e=>setLoginName(e.target.value)} placeholder="이름 입력"
                   className="w-full border-2 border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:border-blue-500"/>
               </div>
             )}
             <div>
               <label className="text-xs text-gray-500 mb-1 block">{loginType==='student'?'로그인 코드 (4자리)':'로그인 코드'}</label>
-              <input type="text" value={loginCode} onChange={e=>setLoginCode(e.target.value)}
+              <input value={loginCode} onChange={e=>setLoginCode(e.target.value)}
                 onKeyDown={e=>e.key==='Enter'&&doLogin()}
                 placeholder={loginType==='student'?'4자리 숫자':'코드 입력'}
                 maxLength={loginType==='student'?4:20}
                 className="w-full border-2 border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:border-blue-500"/>
             </div>
             {loginErr && <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-600">{loginErr}</div>}
-            <button onClick={doLogin} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 rounded-xl transition-colors">로그인</button>
+            <button onClick={doLogin} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 rounded-xl">로그인</button>
           </div>
         )}
       </div>
     </div>
   );
 
-  // STUDENT HOMEWORK LIST
+  // ── 학생 숙제 목록 ──
   if (view==='student') {
-    const hws = getMyHWs();
-    const st = me.data;
+    const hws = myHWs();
+    const st  = me.data;
     const cls = classes.find(c=>c.id===st.classId);
     return (
       <div className="min-h-screen bg-gray-50 p-4">
         <div className="max-w-md mx-auto">
           <div className="bg-white rounded-2xl shadow-sm p-5 mb-4 flex items-center justify-between">
-            <div>
-              <h1 className="text-xl font-bold text-gray-800">📋 숙제 목록</h1>
-              <p className="text-gray-500 text-sm">{st.name} · {cls?.name||''}</p>
-            </div>
-            <button onClick={doLogout} className="text-sm text-gray-500 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50">로그아웃</button>
+            <div><h1 className="text-xl font-bold text-gray-800">📋 숙제 목록</h1>
+              <p className="text-gray-500 text-sm">{st.name} · {cls?.name||''}</p></div>
+            <button onClick={doLogout} className="text-sm text-gray-500 border border-gray-200 px-3 py-1.5 rounded-lg">로그아웃</button>
           </div>
           <div className="space-y-3">
-            {hws.length===0 ? (
-              <div className="bg-white rounded-2xl p-8 text-center text-gray-400">등록된 숙제가 없습니다.</div>
-            ) : hws.map(hw=>{
+            {hws.length===0 && <div className="bg-white rounded-2xl p-8 text-center text-gray-400">등록된 숙제가 없습니다.</div>}
+            {hws.map(hw=>{
               const sub=getMySub(hw.id);
               const mc=hw.questions.filter(q=>q.type==='multiple').length;
               const sc=hw.questions.filter(q=>q.type==='short').length;
@@ -580,10 +921,8 @@ function App() {
                 <div key={hw.id} onClick={()=>selectHW(hw)}
                   className={`bg-white rounded-2xl shadow-sm p-5 cursor-pointer hover:shadow-md transition-all border-2 ${sub?'border-green-200 bg-green-50':'border-transparent'}`}>
                   <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="font-semibold text-gray-800">{hw.title}</h2>
-                      <p className="text-sm text-gray-400 mt-0.5">총 {hw.questions.length}문제 (객관식 {mc}, 주관식 {sc})</p>
-                    </div>
+                    <div><h2 className="font-semibold text-gray-800">{hw.title}</h2>
+                      <p className="text-sm text-gray-400">총 {hw.questions.length}문제 (객관식 {mc}, 주관식 {sc})</p></div>
                     {sub&&<span className="bg-green-500 text-white text-xs px-2.5 py-1 rounded-full">✓ 제출완료</span>}
                   </div>
                   {sub&&<div className="flex gap-3 mt-2 text-xs">
@@ -600,12 +939,12 @@ function App() {
     );
   }
 
-  // SOLVE
+  // ── 풀기 ──
   if (view==='solve'&&selHW) {
-    const total=selHW.questions.length;
-    const answered=Object.values(answers).filter(a=>a!=='').length;
-    const st=me.data;
-    const cls=classes.find(c=>c.id===st.classId);
+    const total    = selHW.questions.length;
+    const answered = Object.values(answers).filter(a=>a!=='').length;
+    const st  = me.data;
+    const cls = classes.find(c=>c.id===st.classId);
     return (
       <div className="min-h-screen bg-gray-50">
         <div className="bg-white shadow-sm sticky top-0 z-10 p-4">
@@ -614,7 +953,7 @@ function App() {
             <p className="text-xs text-gray-400">{st.name} · {cls?.name}</p>
             <div className="flex items-center gap-3 mt-2">
               <div className="flex-1 bg-gray-100 rounded-full h-2">
-                <div className="bg-blue-500 h-2 rounded-full transition-all" style={{width:`${Math.round(answered/total*100)}%`}}/>
+                <div className="bg-blue-500 h-2 rounded-full" style={{width:`${Math.round(answered/total*100)}%`}}/>
               </div>
               <span className="text-sm font-semibold text-gray-600">{answered}/{total}</span>
             </div>
@@ -624,7 +963,7 @@ function App() {
           {selHW.questions.map(q=>(
             <div key={q.number} className="bg-white rounded-xl shadow-sm p-4">
               <div className="flex items-center gap-2 mb-3">
-                <span className="bg-blue-100 text-blue-700 text-sm font-bold w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0">{q.number}</span>
+                <span className="bg-blue-100 text-blue-700 text-sm font-bold w-8 h-8 rounded-full flex items-center justify-center">{q.number}</span>
                 <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">{q.type==='multiple'?'객관식':'주관식'}</span>
               </div>
               {q.type==='multiple' ? (
@@ -636,13 +975,11 @@ function App() {
                     </button>
                   ))}
                 </div>
-              ) : (
-                <MathInput value={answers[q.number]||''} onChange={v=>setAnswers(p=>({...p,[q.number]:v}))}/>
-              )}
+              ) : <MathInput value={answers[q.number]||''} onChange={v=>setAnswers(p=>({...p,[q.number]:v}))}/>}
             </div>
           ))}
           <div className="grid grid-cols-2 gap-3 pb-8">
-            <button onClick={()=>setView('student')} className="py-3 border-2 border-gray-200 text-gray-600 rounded-xl font-medium hover:bg-gray-100">취소</button>
+            <button onClick={()=>setView('student')} className="py-3 border-2 border-gray-200 text-gray-600 rounded-xl">취소</button>
             <button onClick={submitHW} className="py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-semibold">제출하기</button>
           </div>
         </div>
@@ -650,107 +987,107 @@ function App() {
     );
   }
 
-  // RESULTS
-  if (view==='results'&&curResult) return (
+  // ── 결과 ──
+  if (view==='results'&&result) return (
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-md mx-auto space-y-4">
         <div className="bg-white rounded-2xl shadow-sm p-6 text-center">
           <div className="text-5xl mb-3">✅</div>
           <h1 className="text-xl font-bold text-gray-800">숙제가 제출되었습니다!</h1>
-          <p className="text-gray-400 text-sm mt-1">{curResult.studentName}</p>
-          <p className="text-gray-700 font-semibold mt-1">{curResult.homework}</p>
+          <p className="text-gray-400 text-sm mt-1">{result.studentName}</p>
+          <p className="text-gray-700 font-semibold mt-1">{result.homework}</p>
         </div>
         <div className="grid grid-cols-3 gap-3">
-          <div className="bg-green-50 rounded-xl p-4 text-center border border-green-100">
-            <div className="text-2xl font-bold text-green-600">{curResult.correctCount}</div>
-            <div className="text-xs text-green-600 mt-1">맞은 문제</div>
-          </div>
-          <div className="bg-red-50 rounded-xl p-4 text-center border border-red-100">
-            <div className="text-2xl font-bold text-red-500">{curResult.wrongCount}</div>
-            <div className="text-xs text-red-500 mt-1">틀린 문제</div>
-          </div>
-          <div className="bg-gray-50 rounded-xl p-4 text-center border border-gray-200">
-            <div className="text-2xl font-bold text-gray-400">{curResult.unansweredCount}</div>
-            <div className="text-xs text-gray-400 mt-1">모름</div>
-          </div>
+          {[['bg-green-50 border-green-100 text-green-600',result.correctCount,'맞은 문제'],
+            ['bg-red-50 border-red-100 text-red-500',result.wrongCount,'틀린 문제'],
+            ['bg-gray-50 border-gray-200 text-gray-400',result.unansweredCount,'모름']].map(([cls,n,label])=>(
+            <div key={label} className={`${cls} rounded-xl p-4 text-center border`}>
+              <div className="text-2xl font-bold">{n}</div>
+              <div className="text-xs mt-1">{label}</div>
+            </div>
+          ))}
         </div>
         <div className="bg-white rounded-2xl shadow-sm p-5">
           <h2 className="font-semibold text-gray-700 mb-3">문제별 결과</h2>
-          <ResultGrid details={curResult.details}/>
+          <ResultGrid details={result.details}/>
           <div className="flex gap-4 mt-3 text-xs text-gray-400"><span>○ 맞음</span><span>✗ 틀림</span><span>? 모름</span></div>
         </div>
-        <div className="text-center text-sm text-gray-400">🕐 {curResult.date} {curResult.time}</div>
-        <button onClick={()=>{setCurResult(null);setView('student');}} className="w-full py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-semibold">숙제 목록으로</button>
+        <p className="text-center text-sm text-gray-400">🕐 {result.date} {result.time}</p>
+        <button onClick={()=>{setResult(null);setView('student');}} className="w-full py-3 bg-blue-500 hover:bg-blue-600 text-white rounded-xl font-semibold">숙제 목록으로</button>
       </div>
     </div>
   );
 
-  // TEACHER
+  // ── 선생님 ──
   if (view==='teacher') {
-    const teacher=me.data;
-    const tClasses=myClasses();
-    const resetHWForm=()=>{setHwTitle('');setHwPaste('');setHwParsed(null);setHwWarns([]);setHwFiltered(null);setHwRange('');setHwStep(1);setHwManualQs([]);setHwErr('');};
+    const teacher  = me.data;
+    const tClasses = myClasses();
     return (
       <div className="min-h-screen bg-gray-50">
+        {editStudent && (
+          <EditStudentModal
+            student={editStudent}
+            allTeachers={teachers}
+            allStudents={students}
+            onSave={saveStudentEdit}
+            onCancel={()=>setEditStudent(null)}
+          />
+        )}
         <div className="bg-white shadow-sm p-4">
           <div className="max-w-5xl mx-auto flex items-center justify-between">
             <div><h1 className="text-xl font-bold text-gray-800">선생님 페이지</h1><p className="text-sm text-gray-400">{teacher.name} 선생님</p></div>
-            <button onClick={doLogout} className="text-sm text-gray-500 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50">로그아웃</button>
+            <button onClick={doLogout} className="text-sm text-gray-500 border border-gray-200 px-3 py-1.5 rounded-lg">로그아웃</button>
           </div>
         </div>
         <div className="bg-white border-b">
           <div className="max-w-5xl mx-auto flex">
             {[['classes','📚 클래스'],['homework','📝 숙제'],['submissions','📊 제출 현황']].map(([id,label])=>(
-              <button key={id} onClick={()=>{setTTab(id);setTSubView('');setSelClass(null);}}
-                className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${tTab===id?'border-blue-500 text-blue-600':'border-transparent text-gray-500 hover:text-gray-700'}`}>{label}</button>
+              <Tab key={id} id={id} label={label} cur={tTab} set={v=>{setTTab(v);setTSub('');setSelCls(null);}}/>
             ))}
           </div>
         </div>
         <div className="max-w-5xl mx-auto p-4">
 
-          {/* ── CLASSES TAB ── */}
-          {tTab==='classes' && !selClass && (
-            tSubView==='addClass' ? (
+          {/* ── 클래스 탭 ── */}
+          {tTab==='classes'&&!selCls&&(
+            tSub==='addClass' ? (
               <div className="bg-white rounded-2xl shadow-sm p-5 max-w-md">
                 <h2 className="font-semibold text-gray-700 mb-4">새 클래스 만들기</h2>
-                <input type="text" value={newCls} onChange={e=>setNewCls(e.target.value)} placeholder="클래스 이름 (예: 고1 수학A반)"
-                  className="w-full border-2 border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:border-blue-500 mb-3"/>
+                <input value={newCls} onChange={e=>setNewCls(e.target.value)} placeholder="예: 고1 수학A반"
+                  className="w-full border-2 border-gray-200 rounded-xl px-4 py-2.5 mb-3 focus:outline-none focus:border-blue-500"/>
                 {clsErr&&<p className="text-red-500 text-sm mb-3">{clsErr}</p>}
                 <div className="flex gap-2">
-                  <button onClick={()=>{setTSubView('');setClsErr('');}} className="flex-1 py-2 border-2 border-gray-200 text-gray-600 rounded-xl">취소</button>
-                  <button onClick={addClassFn} className="flex-1 py-2 bg-blue-500 text-white rounded-xl font-semibold">생성</button>
+                  <button onClick={()=>{setTSub('');setClsErr('');}} className="flex-1 py-2 border-2 border-gray-200 text-gray-600 rounded-xl">취소</button>
+                  <button onClick={addClass} className="flex-1 py-2 bg-blue-500 text-white rounded-xl font-semibold">생성</button>
                 </div>
               </div>
             ) : (
               <div className="space-y-3">
-                {tClasses.length===0 && <div className="bg-white rounded-2xl p-8 text-center text-gray-400">클래스가 없습니다.</div>}
-                {tClasses.map(cls=>{
-                  const n=students.filter(s=>cls.studentIds.includes(s.id)).length;
-                  return (
-                    <div key={cls.id} className="bg-white rounded-2xl shadow-sm p-5 flex items-center justify-between">
-                      <div><h2 className="font-semibold text-gray-800">📚 {cls.name}</h2><p className="text-sm text-gray-400">{n}명</p></div>
-                      <button onClick={()=>setSelClass(cls)} className="bg-blue-50 text-blue-600 px-4 py-2 rounded-xl text-sm font-medium hover:bg-blue-100">관리 →</button>
-                    </div>
-                  );
-                })}
-                <button onClick={()=>setTSubView('addClass')}
-                  className="w-full py-3 border-2 border-dashed border-gray-300 text-gray-500 rounded-2xl hover:border-blue-300 hover:text-blue-500">+ 새 클래스</button>
+                {tClasses.length===0&&<div className="bg-white rounded-2xl p-8 text-center text-gray-400">클래스가 없습니다.</div>}
+                {tClasses.map(cls=>(
+                  <div key={cls.id} className="bg-white rounded-2xl shadow-sm p-5 flex items-center justify-between">
+                    <div><h2 className="font-semibold text-gray-800">📚 {cls.name}</h2>
+                      <p className="text-sm text-gray-400">{students.filter(s=>cls.studentIds.includes(s.id)).length}명</p></div>
+                    <button onClick={()=>setSelCls(cls)} className="bg-blue-50 text-blue-600 px-4 py-2 rounded-xl text-sm font-medium hover:bg-blue-100">관리 →</button>
+                  </div>
+                ))}
+                <button onClick={()=>setTSub('addClass')} className="w-full py-3 border-2 border-dashed border-gray-300 text-gray-500 rounded-2xl hover:border-blue-300 hover:text-blue-500">+ 새 클래스</button>
               </div>
             )
           )}
 
-          {tTab==='classes' && selClass && (
+          {tTab==='classes'&&selCls&&(
             <div>
               <div className="flex items-center gap-3 mb-4">
-                <button onClick={()=>{setSelClass(null);setTSubView('');}} className="text-gray-500 hover:text-gray-700 text-sm">← 목록</button>
-                <h2 className="font-bold text-gray-800 text-lg">{selClass.name}</h2>
+                <button onClick={()=>{setSelCls(null);setTSub('');}} className="text-gray-500 hover:text-gray-700 text-sm">← 목록</button>
+                <h2 className="font-bold text-gray-800 text-lg">{selCls.name}</h2>
               </div>
-              {tSubView==='addStudent' ? (
+              {tSub==='addStudent' ? (
                 <div className="bg-white rounded-2xl shadow-sm p-5 max-w-md">
                   <h3 className="font-semibold text-gray-700 mb-4">학생 추가</h3>
                   <div className="space-y-3">
                     <div><label className="text-xs text-gray-500 mb-1 block">이름</label>
-                      <input type="text" value={nsName} onChange={e=>setNsName(e.target.value)} placeholder="학생 이름"
+                      <input value={nsName} onChange={e=>setNsName(e.target.value)} placeholder="학생 이름"
                         className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"/></div>
                     <div><label className="text-xs text-gray-500 mb-1 block">학교</label>
                       <div className="grid grid-cols-2 gap-2">
@@ -772,52 +1109,51 @@ function App() {
                           <button key={m} onClick={()=>setNsMode(m)} className={`flex-1 py-1.5 rounded-lg border-2 text-sm ${nsMode===m?'border-blue-500 bg-blue-50 text-blue-600':'border-gray-200 text-gray-500'}`}>{m==='auto'?'자동 생성':'직접 입력'}</button>
                         ))}
                       </div>
-                      {nsMode==='manual'&&<input type="text" value={nsManual} onChange={e=>setNsManual(e.target.value)} placeholder="4자리 숫자" maxLength={4}
+                      {nsMode==='manual'&&<input value={nsManual} onChange={e=>setNsManual(e.target.value)} placeholder="4자리 숫자" maxLength={4}
                         className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"/>}
                     </div>
                     {nsErr&&<p className="text-red-500 text-xs">{nsErr}</p>}
                     <div className="flex gap-2">
-                      <button onClick={()=>{setTSubView('');setNsErr('');}} className="flex-1 py-2 border-2 border-gray-200 text-gray-600 rounded-lg text-sm">취소</button>
-                      <button onClick={addStudentFn} className="flex-1 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium">추가</button>
+                      <button onClick={()=>{setTSub('');setNsErr('');}} className="flex-1 py-2 border-2 border-gray-200 text-gray-600 rounded-lg text-sm">취소</button>
+                      <button onClick={addStudent} className="flex-1 py-2 bg-blue-500 text-white rounded-lg text-sm font-medium">추가</button>
                     </div>
                   </div>
                 </div>
               ) : (
                 <div className="bg-white rounded-2xl shadow-sm p-5">
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-semibold text-gray-700">학생 목록 ({students.filter(s=>selClass.studentIds.includes(s.id)).length}명)</h3>
-                    <button onClick={()=>setTSubView('addStudent')} className="bg-blue-50 text-blue-600 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-100">+ 학생 추가</button>
+                    <h3 className="font-semibold text-gray-700">학생 목록 ({students.filter(s=>selCls.studentIds.includes(s.id)).length}명)</h3>
+                    <button onClick={()=>setTSub('addStudent')} className="bg-blue-50 text-blue-600 px-3 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-100">+ 학생 추가</button>
                   </div>
                   <div className="space-y-2">
-                    {students.filter(s=>selClass.studentIds.includes(s.id)).map(s=>(
+                    {students.filter(s=>selCls.studentIds.includes(s.id)).map(s=>(
                       <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3">
-                        <div>
-                          <span className="font-medium text-gray-700">{s.name}</span>
-                          <span className="text-xs text-gray-400 ml-2">{s.schoolType} {s.grade}학년</span>
-                        </div>
+                        <div><span className="font-medium text-gray-700">{s.name}</span>
+                          <span className="text-xs text-gray-400 ml-2">{s.schoolType} {s.grade}학년</span></div>
                         <div className="flex items-center gap-3">
                           <span className="text-xs font-mono bg-blue-50 text-blue-600 px-2 py-1 rounded">코드: {s.loginCode}</span>
+                          <button onClick={()=>setEditStudent(s)} className="text-blue-400 hover:text-blue-600 text-xs">수정</button>
                           <button onClick={()=>delStudent(s.id)} className="text-red-400 hover:text-red-600 text-xs">삭제</button>
                         </div>
                       </div>
                     ))}
-                    {students.filter(s=>selClass.studentIds.includes(s.id)).length===0&&<p className="text-gray-400 text-sm text-center py-4">등록된 학생이 없습니다.</p>}
+                    {students.filter(s=>selCls.studentIds.includes(s.id)).length===0&&<p className="text-gray-400 text-sm text-center py-4">학생이 없습니다.</p>}
                   </div>
                 </div>
               )}
             </div>
           )}
 
-          {/* ── HOMEWORK TAB ── */}
-          {tTab==='homework' && (
+          {/* ── 숙제 탭 ── */}
+          {tTab==='homework'&&(
             <div className="space-y-4">
-              {!selClass ? (
+              {!selCls ? (
                 <div className="bg-white rounded-2xl shadow-sm p-5">
                   <h3 className="font-semibold text-gray-700 mb-3">클래스 선택</h3>
                   <div className="space-y-2">
                     {tClasses.map(cls=>(
-                      <button key={cls.id} onClick={()=>{setSelClass(cls);setTSubView('');}}
-                        className="w-full flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3 hover:bg-blue-50 hover:text-blue-600 transition-colors">
+                      <button key={cls.id} onClick={()=>{setSelCls(cls);setTSub('');}}
+                        className="w-full flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3 hover:bg-blue-50 transition-colors">
                         <span className="font-medium">📚 {cls.name}</span>
                         <span className="text-sm text-gray-400">{homeworks.filter(h=>cls.homeworkIds.includes(h.id)).length}개 숙제</span>
                       </button>
@@ -825,51 +1161,52 @@ function App() {
                     {tClasses.length===0&&<p className="text-gray-400 text-sm text-center py-4">클래스를 먼저 만들어주세요.</p>}
                   </div>
                 </div>
-              ) : tSubView==='addHomework' ? (
+              ) : tSub==='addHomework' ? (
+                /* 숙제 생성 폼 */
                 <div className="bg-white rounded-2xl shadow-sm p-5">
                   <div className="flex items-center gap-2 mb-4">
-                    <button onClick={()=>{setTSubView('');resetHWForm();}} className="text-sm text-gray-500 hover:text-gray-700">← 취소</button>
-                    <h3 className="font-semibold text-gray-700">숙제 만들기 - {selClass.name}</h3>
+                    <button onClick={()=>{setTSub('');resetHW();}} className="text-sm text-gray-500 hover:text-gray-700">← 취소</button>
+                    <h3 className="font-semibold text-gray-700">숙제 만들기 — {selCls.name}</h3>
                   </div>
-                  {/* Step indicator */}
+
+                  {/* 스텝 표시 */}
                   <div className="flex gap-2 mb-5">
-                    {['답안 입력','범위 선택','미리보기'].map((s,i)=>(
-                      <div key={i} className={`flex-1 text-center text-xs py-1.5 rounded-lg font-medium ${hwStep===i+1?'bg-blue-500 text-white':hwStep>i+1?'bg-green-100 text-green-700':'bg-gray-100 text-gray-400'}`}>{i+1}. {s}</div>
+                    {['1.답안 입력','2.범위 선택','3.확인'].map((s,i)=>(
+                      <div key={i} className={`flex-1 text-center text-xs py-1.5 rounded-lg font-medium
+                        ${hwStep===i+1?'bg-blue-500 text-white':hwStep>i+1?'bg-green-100 text-green-700':'bg-gray-100 text-gray-400'}`}>{s}</div>
                     ))}
                   </div>
 
-                  {hwStep===1 && (
+                  {/* STEP 1 */}
+                  {hwStep===1&&(
                     <div className="space-y-4">
                       <div>
                         <label className="text-xs text-gray-500 mb-1 block">숙제 제목</label>
-                        <input type="text" value={hwTitle} onChange={e=>setHwTitle(e.target.value)} placeholder="예: 01 지수함수"
+                        <input value={hwTitle} onChange={e=>setHwTitle(e.target.value)} placeholder="예: 01 지수함수"
                           className="w-full border-2 border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:border-blue-500"/>
                       </div>
                       <div className="flex gap-2">
                         {[['quick','⚡ PDF/텍스트'],['manual','✏️ 수동 입력']].map(([m,l])=>(
-                          <button key={m} onClick={()=>setHwMethod(m)} className={`flex-1 py-2 rounded-lg text-sm font-medium border-2 ${hwMethod===m?'border-blue-500 bg-blue-50 text-blue-600':'border-gray-200 text-gray-500'}`}>{l}</button>
+                          <button key={m} onClick={()=>setHwMethod(m)}
+                            className={`flex-1 py-2 rounded-lg text-sm font-medium border-2 ${hwMethod===m?'border-blue-500 bg-blue-50 text-blue-600':'border-gray-200 text-gray-500'}`}>{l}</button>
                         ))}
                       </div>
 
-                      {hwMethod==='quick' && (
+                      {hwMethod==='quick'&&(
                         <div>
-                          <div onDragOver={e=>{e.preventDefault();setIsDrag(true);}} onDragLeave={()=>setIsDrag(false)} onDrop={handleDrop}
-                            className={`border-2 border-dashed rounded-xl p-6 text-center mb-3 transition-all ${isDrag?'border-blue-400 bg-blue-50':'border-gray-300'}`}>
-                            {pdfLoad ? <p className="text-blue-500 text-sm">PDF 읽는 중...</p> : (
-                              <div>
-                                <p className="text-gray-400 text-sm mb-2">📄 PDF 파일을 여기에 드래그하거나</p>
-                                <label className="cursor-pointer bg-gray-100 hover:bg-gray-200 text-gray-600 px-4 py-2 rounded-lg text-sm inline-block">
-                                  파일 선택
-                                  <input type="file" accept=".pdf" className="hidden" onChange={e=>readPDF(e.target.files[0])}/>
-                                </label>
-                              </div>
-                            )}
+                          {/* 드롭존 + 파일 선택 */}
+                          <div onDragOver={e=>{e.preventDefault();setIsDrag(true);}}
+                               onDragLeave={()=>setIsDrag(false)}
+                               onDrop={async e=>{e.preventDefault();setIsDrag(false);const f=e.dataTransfer.files[0];if(f)await handlePDFFile(f);}}
+                            className={`border-2 border-dashed rounded-xl p-6 text-center mb-3 transition-all ${isDrag?'border-blue-400 bg-blue-50':'border-gray-300 bg-gray-50'}`}>
+                            <p className="text-gray-400 text-sm mb-3">📄 PDF 파일을 여기에 드래그하거나</p>
+                            <FilePickerButton onFile={handlePDFFile} loading={pdfLoading}/>
                           </div>
                           <p className="text-xs text-gray-400 mb-2">또는 텍스트 직접 붙여넣기:</p>
                           <textarea value={hwPaste} onChange={e=>setHwPaste(e.target.value)} rows={8}
-                            placeholder={"1) [정답] ④\n2) [정답] ⑤\n3) [정답] ④\n...\n또는\n0631 ②  0632 −15  0633 ①"}
-                            className="w-full border-2 border-gray-200 rounded-xl p-3 text-sm font-mono focus:outline-none focus:border-purple-500 resize-none"/>
-                          {hwErr&&<p className="text-red-500 text-sm mt-1">{hwErr}</p>}
+                            placeholder={"1) [정답] ④\n2) [정답] ⑤\n...\n또는\n0631 ②  0632 −15  0633 ①"}
+                            className="w-full border-2 border-gray-200 rounded-xl p-3 text-sm font-mono resize-none focus:outline-none focus:border-purple-500"/>
+                          {hwErr&&<p className={`text-sm mt-1 ${hwErr.startsWith('✅')?'text-green-600':hwErr.startsWith('🔄')?'text-blue-500':'text-red-500'}`}>{hwErr}</p>}
                           <button onClick={parseFn} disabled={!hwPaste.trim()||!hwTitle.trim()}
                             className="mt-2 w-full bg-purple-500 hover:bg-purple-600 disabled:bg-gray-300 text-white py-2.5 rounded-xl text-sm font-semibold">
                             ⚡ 자동 파싱하기
@@ -878,17 +1215,17 @@ function App() {
                         </div>
                       )}
 
-                      {hwMethod==='manual' && (
+                      {hwMethod==='manual'&&(
                         <div>
                           <div className="flex items-center gap-3 mb-3">
                             <label className="text-sm text-gray-600">문항 수</label>
                             <input type="number" value={hwManualCnt} min={1} max={200}
-                              onChange={e=>setHwManualCnt(Math.max(1,Math.min(200,Number(e.target.value))))}
+                              onChange={e=>setHwManualCnt(Math.max(1,Math.min(200,+e.target.value)))}
                               className="border-2 border-gray-200 rounded-lg px-3 py-1.5 text-sm w-20 focus:outline-none focus:border-blue-500"/>
                             <button onClick={()=>setHwManualQs(Array.from({length:hwManualCnt},(_,i)=>({number:i+1,type:'multiple',answer:''})))}
                               className="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-1.5 rounded-lg text-sm font-medium">문항 생성</button>
                           </div>
-                          {hwManualQs.length>0 && (
+                          {hwManualQs.length>0&&(
                             <div>
                               <div className="border rounded-xl overflow-hidden max-h-72 overflow-y-auto">
                                 <table className="w-full text-sm">
@@ -910,7 +1247,7 @@ function App() {
                                               <option value="">선택</option>{[1,2,3,4,5].map(n=><option key={n} value={String(n)}>{n}번</option>)}
                                             </select>
                                           ):(
-                                            <input type="text" value={q.answer} onChange={e=>{const u=[...hwManualQs];u[i]={...q,answer:e.target.value};setHwManualQs(u);}}
+                                            <input value={q.answer} onChange={e=>{const u=[...hwManualQs];u[i]={...q,answer:e.target.value};setHwManualQs(u);}}
                                               placeholder="답안" className="border rounded px-1 py-0.5 text-xs w-24"/>
                                           )}
                                         </td>
@@ -919,9 +1256,10 @@ function App() {
                                   </tbody>
                                 </table>
                               </div>
-                              {hwErr&&<p className="text-red-500 text-sm mt-2">{hwErr}</p>}
+                              {hwErr&&<p className={`text-sm mt-2 ${hwErr.startsWith('✅')?'text-green-600':hwErr.startsWith('🔄')?'text-blue-500':'text-red-500'}`}>{hwErr}</p>}
                               <button onClick={()=>saveHW(hwManualQs)} disabled={!hwTitle.trim()}
                                 className="mt-3 w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white py-2.5 rounded-xl text-sm font-semibold">저장</button>
+                              {!hwTitle.trim()&&<p className="text-xs text-orange-500 mt-1 text-center">※ 제목을 먼저 입력하세요</p>}
                             </div>
                           )}
                         </div>
@@ -929,16 +1267,17 @@ function App() {
                     </div>
                   )}
 
-                  {hwStep===2 && hwParsed && (
+                  {/* STEP 2 */}
+                  {hwStep===2&&hwParsed&&(
                     <div className="space-y-4">
-                      <div className={`rounded-xl p-3 text-sm ${hwWarns.length>0?'bg-yellow-50 border border-yellow-200':'bg-green-50 border border-green-200'}`}>
-                        <p className={`font-semibold ${hwWarns.length>0?'text-yellow-700':'text-green-700'}`}>✅ {hwParsed.length}개 문제 인식됨</p>
+                      <div className={`rounded-xl p-3 text-sm ${hwWarns.length?'bg-yellow-50 border border-yellow-200':'bg-green-50 border border-green-200'}`}>
+                        <p className={`font-semibold ${hwWarns.length?'text-yellow-700':'text-green-700'}`}>✅ {hwParsed.length}개 문제 인식됨</p>
                         {hwWarns.map((w,i)=><p key={i} className="text-yellow-600 text-xs mt-1">⚠️ {w}</p>)}
                       </div>
                       <div>
                         <label className="text-sm font-medium text-gray-700 mb-1 block">문항 범위 선택</label>
-                        <p className="text-xs text-gray-400 mb-2">예: 전체 / 85-107 / 85-107, 145 / 1-10, 15, 20-25</p>
-                        <input type="text" value={hwRange} onChange={e=>setHwRange(e.target.value)} placeholder="비워두면 전체 문항"
+                        <p className="text-xs text-gray-400 mb-2">비워두면 전체 / 예: 85-107 / 85-107, 145</p>
+                        <input value={hwRange} onChange={e=>setHwRange(e.target.value)} placeholder="전체 또는 범위 입력"
                           className="w-full border-2 border-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:border-blue-500"/>
                         {hwRangeErr&&<p className="text-red-500 text-xs mt-1">❌ {hwRangeErr}</p>}
                       </div>
@@ -949,7 +1288,8 @@ function App() {
                     </div>
                   )}
 
-                  {hwStep===3 && hwFiltered && (
+                  {/* STEP 3 */}
+                  {hwStep===3&&hwFiltered&&(
                     <div className="space-y-4">
                       <div className="bg-blue-50 rounded-xl p-3 text-sm">
                         <p className="font-semibold text-blue-700">📋 {hwTitle}</p>
@@ -975,8 +1315,11 @@ function App() {
                                       <option value="">선택</option>{[1,2,3,4,5].map(n=><option key={n} value={String(n)}>{n}번</option>)}
                                     </select>
                                   ):(
-                                    <input type="text" value={q.answer} onChange={e=>{const u=[...hwFiltered];u[i]={...q,answer:e.target.value};setHwFiltered(u);}}
-                                      placeholder="답안" className={`border rounded px-1 py-0.5 text-xs w-24 ${!q.answer?'border-yellow-400':''}`}/>
+                                    <div>
+                                      <input value={q.answer} onChange={e=>{const u=[...hwFiltered];u[i]={...q,answer:e.target.value};setHwFiltered(u);}}
+                                        placeholder="답안" className={`border rounded px-1 py-0.5 text-xs w-24 ${!q.answer?'border-yellow-400':''}`}/>
+                                      {q.answer && <span className="ml-1 text-xs" dangerouslySetInnerHTML={{__html: renderLatex(q.answer)}}/>}
+                                    </div>
                                   )}
                                   {!q.answer&&<span className="text-yellow-400 ml-1 text-xs">⚠️</span>}
                                 </td>
@@ -985,9 +1328,7 @@ function App() {
                           </tbody>
                         </table>
                       </div>
-                      {hwFiltered.some(q=>!q.answer)&&(
-                        <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3 text-sm text-yellow-700">⚠️ 답안이 비어있는 문항이 있습니다. 위 표에서 직접 수정하세요.</div>
-                      )}
+                      {hwFiltered.some(q=>!q.answer)&&<div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3 text-sm text-yellow-700">⚠️ 답안이 비어있는 문항을 위 표에서 직접 수정하세요.</div>}
                       <div className="flex gap-2">
                         <button onClick={()=>setHwStep(2)} className="flex-1 py-2 border-2 border-gray-200 text-gray-600 rounded-xl text-sm">← 이전</button>
                         <button onClick={()=>saveHW(hwFiltered)} className="flex-1 py-2 bg-blue-500 text-white rounded-xl text-sm font-semibold">✓ 숙제 내기</button>
@@ -996,42 +1337,41 @@ function App() {
                   )}
                 </div>
               ) : (
+                /* 숙제 목록 */
                 <div>
                   <div className="flex items-center gap-3 mb-4">
-                    <button onClick={()=>setSelClass(null)} className="text-sm text-gray-500 hover:text-gray-700">← 클래스 선택</button>
-                    <h3 className="font-bold text-gray-800">{selClass.name}</h3>
+                    <button onClick={()=>setSelCls(null)} className="text-sm text-gray-500 hover:text-gray-700">← 클래스 선택</button>
+                    <h3 className="font-bold text-gray-800">{selCls.name}</h3>
                   </div>
                   <div className="space-y-3">
-                    {homeworks.filter(h=>selClass.homeworkIds.includes(h.id)).map(hw=>{
+                    {homeworks.filter(h=>selCls.homeworkIds.includes(h.id)).map(hw=>{
                       const mc=hw.questions.filter(q=>q.type==='multiple').length;
                       const sc=hw.questions.filter(q=>q.type==='short').length;
                       return (
                         <div key={hw.id} className="bg-white rounded-2xl shadow-sm p-4 flex items-center justify-between">
-                          <div><p className="font-medium text-gray-700">{hw.title}</p><p className="text-xs text-gray-400">{hw.questions.length}문제 (객관식 {mc}, 주관식 {sc})</p></div>
+                          <div><p className="font-medium text-gray-700">{hw.title}</p>
+                            <p className="text-xs text-gray-400">{hw.questions.length}문제 (객관식 {mc}, 주관식 {sc})</p></div>
                           <button onClick={()=>delHW(hw.id)} className="text-red-400 hover:text-red-600 text-xs">삭제</button>
                         </div>
                       );
                     })}
-                    {homeworks.filter(h=>selClass.homeworkIds.includes(h.id)).length===0&&(
-                      <div className="bg-white rounded-2xl p-6 text-center text-gray-400">등록된 숙제가 없습니다.</div>
-                    )}
-                    <button onClick={()=>{setTSubView('addHomework');resetHWForm();}}
-                      className="w-full py-3 border-2 border-dashed border-gray-300 text-gray-500 rounded-2xl hover:border-blue-300 hover:text-blue-500">+ 숙제 추가</button>
+                    {homeworks.filter(h=>selCls.homeworkIds.includes(h.id)).length===0&&<div className="bg-white rounded-2xl p-6 text-center text-gray-400">등록된 숙제가 없습니다.</div>}
+                    <button onClick={()=>{setTSub('addHomework');resetHW();}} className="w-full py-3 border-2 border-dashed border-gray-300 text-gray-500 rounded-2xl hover:border-blue-300 hover:text-blue-500">+ 숙제 추가</button>
                   </div>
                 </div>
               )}
             </div>
           )}
 
-          {/* ── SUBMISSIONS TAB ── */}
-          {tTab==='submissions' && (
+          {/* ── 제출 현황 탭 ── */}
+          {tTab==='submissions'&&(
             <div className="space-y-4">
-              {!selClass ? (
+              {!selCls ? (
                 <div className="bg-white rounded-2xl shadow-sm p-5">
                   <h3 className="font-semibold text-gray-700 mb-3">클래스 선택</h3>
                   <div className="space-y-2">
                     {tClasses.map(cls=>(
-                      <button key={cls.id} onClick={()=>setSelClass(cls)}
+                      <button key={cls.id} onClick={()=>setSelCls(cls)}
                         className="w-full flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3 hover:bg-blue-50 transition-colors">
                         <span className="font-medium">📚 {cls.name}</span>
                         <span className="text-sm text-gray-400">{students.filter(s=>cls.studentIds.includes(s.id)).length}명</span>
@@ -1043,21 +1383,21 @@ function App() {
               ) : (
                 <div>
                   <div className="flex items-center gap-3 mb-4">
-                    <button onClick={()=>setSelClass(null)} className="text-sm text-gray-500 hover:text-gray-700">← 클래스 선택</button>
-                    <h3 className="font-bold text-gray-800">{selClass.name}</h3>
+                    <button onClick={()=>setSelCls(null)} className="text-sm text-gray-500 hover:text-gray-700">← 클래스 선택</button>
+                    <h3 className="font-bold text-gray-800">{selCls.name}</h3>
                   </div>
-                  {classStats(selClass.id).map(({hw,subs,notSubmitted,clsStudents,top5,avg})=>(
+                  {classStats(selCls.id).map(({hw,hwSubs,notSub,clsSts,top5,avg})=>(
                     <div key={hw.id} className="bg-white rounded-2xl shadow-sm p-5 mb-4">
                       <div className="flex items-center justify-between mb-3">
                         <h4 className="font-semibold text-gray-800">📝 {hw.title}</h4>
-                        <span className={`text-sm font-medium ${subs.length===clsStudents.length?'text-green-600':'text-orange-500'}`}>{subs.length}/{clsStudents.length}명 제출</span>
+                        <span className={`text-sm font-medium ${hwSubs.length===clsSts.length?'text-green-600':'text-orange-500'}`}>{hwSubs.length}/{clsSts.length}명 제출</span>
                       </div>
-                      {subs.length>0&&<p className="text-xs text-gray-400 mb-3">평균: {avg}/{hw.questions.length}문제</p>}
-                      {subs.length>0&&(
+                      {hwSubs.length>0&&<p className="text-xs text-gray-400 mb-3">평균: {avg}/{hw.questions.length}문제</p>}
+                      {hwSubs.length>0&&(
                         <div className="mb-3">
-                          <p className="text-xs font-medium text-green-600 mb-2">✅ 제출 완료 ({subs.length}명)</p>
+                          <p className="text-xs font-medium text-green-600 mb-2">✅ 제출 완료 ({hwSubs.length}명)</p>
                           <div className="space-y-1">
-                            {subs.map(sub=>(
+                            {hwSubs.map(sub=>(
                               <div key={sub.id} className="flex items-center justify-between bg-green-50 rounded-lg px-3 py-2 text-sm">
                                 <span className="font-medium text-gray-700">{sub.studentName}</span>
                                 <div className="flex gap-3 text-xs">
@@ -1070,15 +1410,15 @@ function App() {
                           </div>
                         </div>
                       )}
-                      {notSubmitted.length>0&&(
+                      {notSub.length>0&&(
                         <div className="mb-3">
-                          <p className="text-xs font-medium text-red-500 mb-2">❌ 미제출 ({notSubmitted.length}명)</p>
+                          <p className="text-xs font-medium text-red-500 mb-2">❌ 미제출 ({notSub.length}명)</p>
                           <div className="flex flex-wrap gap-2">
-                            {notSubmitted.map(s=><span key={s.id} className="bg-red-50 text-red-500 text-xs px-2 py-1 rounded-lg">{s.name}</span>)}
+                            {notSub.map(s=><span key={s.id} className="bg-red-50 text-red-500 text-xs px-2 py-1 rounded-lg">{s.name}</span>)}
                           </div>
                         </div>
                       )}
-                      {subs.length>0&&top5.length>0&&(
+                      {hwSubs.length>0&&top5.length>0&&(
                         <div>
                           <p className="text-xs font-medium text-gray-500 mb-2">📊 오답률 높은 문항 TOP 5</p>
                           <div className="space-y-1.5">
@@ -1087,18 +1427,17 @@ function App() {
                                 <span className="text-gray-500 w-12 flex-shrink-0">{s.number}번</span>
                                 <span className="text-gray-400 w-10 flex-shrink-0">{s.type==='multiple'?'객관식':'주관식'}</span>
                                 <div className="flex-1 bg-gray-100 rounded-full h-1.5">
-                                  <div className="bg-red-400 h-1.5 rounded-full" style={{width:`${s.wrongRate}%`}}/>
+                                  <div className="bg-red-400 h-1.5 rounded-full" style={{width:`${s.rate}%`}}/>
                                 </div>
-                                <span className="text-red-500 font-medium w-10 text-right">{s.wrongRate}%</span>
+                                <span className="text-red-500 font-medium w-10 text-right">{s.rate}%</span>
                               </div>
                             ))}
                           </div>
                         </div>
                       )}
-                      {subs.length===0&&notSubmitted.length>0&&<p className="text-gray-400 text-sm text-center py-2">아직 제출된 답안이 없습니다.</p>}
                     </div>
                   ))}
-                  {classStats(selClass.id).length===0&&<div className="bg-white rounded-2xl p-8 text-center text-gray-400">등록된 숙제가 없습니다.</div>}
+                  {classStats(selCls.id).length===0&&<div className="bg-white rounded-2xl p-8 text-center text-gray-400">등록된 숙제가 없습니다.</div>}
                 </div>
               )}
             </div>
@@ -1108,32 +1447,30 @@ function App() {
     );
   }
 
-  // ADMIN
+  // ── 관리자 ──
   if (view==='admin') return (
     <div className="min-h-screen bg-gray-50">
       <div className="bg-white shadow-sm p-4">
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <div><h1 className="text-xl font-bold text-gray-800">관리자 페이지</h1><p className="text-sm text-gray-400">시스템 전체 관리</p></div>
-          <button onClick={doLogout} className="text-sm text-gray-500 border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50">로그아웃</button>
+          <button onClick={doLogout} className="text-sm text-gray-500 border border-gray-200 px-3 py-1.5 rounded-lg">로그아웃</button>
         </div>
       </div>
       <div className="bg-white border-b">
         <div className="max-w-5xl mx-auto flex">
           {[['teachers','👨‍🏫 선생님 관리'],['students','👥 전체 학생']].map(([id,label])=>(
-            <button key={id} onClick={()=>{setATab(id);setDetailT(null);}}
-              className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${aTab===id?'border-blue-500 text-blue-600':'border-transparent text-gray-500 hover:text-gray-700'}`}>{label}</button>
+            <Tab key={id} id={id} label={label} cur={aTab} set={v=>{setATab(v);setDetailT(null);}}/>
           ))}
         </div>
       </div>
       <div className="max-w-5xl mx-auto p-4">
-
-        {aTab==='teachers' && !detailT && (
+        {aTab==='teachers'&&!detailT&&(
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-white rounded-2xl shadow-sm p-5">
               <h2 className="font-semibold text-gray-700 mb-4">선생님 추가</h2>
               <div className="space-y-3">
                 <div><label className="text-xs text-gray-500 mb-1 block">이름</label>
-                  <input type="text" value={newTName} onChange={e=>setNewTName(e.target.value)} placeholder="선생님 이름"
+                  <input value={newTName} onChange={e=>setNewTName(e.target.value)} placeholder="선생님 이름"
                     className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"/></div>
                 <div><label className="text-xs text-gray-500 mb-1 block">로그인 코드</label>
                   <div className="flex gap-2 mb-2">
@@ -1141,7 +1478,7 @@ function App() {
                       <button key={m} onClick={()=>setNewTMode(m)} className={`flex-1 py-1.5 rounded-lg border-2 text-sm ${newTMode===m?'border-blue-500 bg-blue-50 text-blue-600':'border-gray-200 text-gray-500'}`}>{m==='auto'?'자동 생성':'직접 입력'}</button>
                     ))}
                   </div>
-                  {newTMode==='manual'&&<input type="text" value={newTManual} onChange={e=>setNewTManual(e.target.value)} placeholder="4자리 숫자" maxLength={4}
+                  {newTMode==='manual'&&<input value={newTManual} onChange={e=>setNewTManual(e.target.value)} placeholder="4자리 숫자" maxLength={4}
                     className="w-full border-2 border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"/>}
                 </div>
                 {newTErr&&<p className="text-red-500 text-xs">{newTErr}</p>}
@@ -1153,14 +1490,13 @@ function App() {
               <div className="space-y-2 max-h-96 overflow-y-auto">
                 {teachers.map(t=>(
                   editT?.id===t.id ? (
-                    <EditTeacherForm key={t.id} teacher={t} allTeachers={teachers} allStudents={students} onSave={updateTeacher} onCancel={()=>setEditT(null)}/>
+                    <EditTeacherForm key={t.id} teacher={t} allTeachers={teachers} allStudents={students}
+                      onSave={t=>{setTeachers(p=>p.map(x=>x.id===t.id?t:x));setEditT(null);}} onCancel={()=>setEditT(null)}/>
                   ) : (
                     <div key={t.id} className="bg-gray-50 rounded-xl px-4 py-3">
                       <div className="flex items-center justify-between">
-                        <div>
-                          <span className="font-medium text-gray-700">{t.name}</span>
-                          <span className="text-xs font-mono bg-blue-50 text-blue-600 px-2 py-0.5 rounded ml-2">코드: {t.loginCode}</span>
-                        </div>
+                        <div><span className="font-medium text-gray-700">{t.name}</span>
+                          <span className="text-xs font-mono bg-blue-50 text-blue-600 px-2 py-0.5 rounded ml-2">코드: {t.loginCode}</span></div>
                         <div className="flex gap-2 text-xs">
                           <button onClick={()=>setDetailT(t)} className="text-blue-500 hover:text-blue-700">상세</button>
                           <button onClick={()=>setEditT(t)} className="text-gray-500 hover:text-gray-700">수정</button>
@@ -1176,28 +1512,25 @@ function App() {
             </div>
           </div>
         )}
-
-        {aTab==='teachers' && detailT && (
+        {aTab==='teachers'&&detailT&&(
           <div>
             <button onClick={()=>setDetailT(null)} className="text-sm text-gray-500 hover:text-gray-700 mb-4 block">← 목록</button>
             <div className="bg-white rounded-2xl shadow-sm p-5">
-              <h2 className="font-bold text-gray-800 text-lg mb-4">{detailT.name} 선생님 상세 정보</h2>
+              <h2 className="font-bold text-gray-800 text-lg mb-4">{detailT.name} 선생님 상세</h2>
               {classes.filter(c=>detailT.classIds.includes(c.id)).map(cls=>{
-                const clsStudents=students.filter(s=>cls.studentIds.includes(s.id));
-                const clsHWs=homeworks.filter(h=>cls.homeworkIds.includes(h.id));
+                const clsSts=students.filter(s=>cls.studentIds.includes(s.id));
                 return (
                   <div key={cls.id} className="mb-5">
-                    <h3 className="font-semibold text-gray-700 mb-2">📚 {cls.name} ({clsStudents.length}명)</h3>
-                    {clsHWs.map(hw=>{
-                      const subs=submissions.filter(s=>s.homeworkId===hw.id);
+                    <h3 className="font-semibold text-gray-700 mb-2">📚 {cls.name} ({clsSts.length}명)</h3>
+                    {homeworks.filter(h=>cls.homeworkIds.includes(h.id)).map(hw=>{
+                      const n=subs.filter(s=>s.homeworkId===hw.id).length;
                       return (
                         <div key={hw.id} className="bg-gray-50 rounded-xl px-4 py-3 mb-2 flex justify-between text-sm">
                           <span className="font-medium">{hw.title}</span>
-                          <span className={subs.length===clsStudents.length?'text-green-600':'text-orange-500'}>제출 {subs.length}/{clsStudents.length}명</span>
+                          <span className={n===clsSts.length?'text-green-600':'text-orange-500'}>제출 {n}/{clsSts.length}명</span>
                         </div>
                       );
                     })}
-                    {clsHWs.length===0&&<p className="text-xs text-gray-400 mb-2">숙제 없음</p>}
                   </div>
                 );
               })}
@@ -1205,28 +1538,25 @@ function App() {
             </div>
           </div>
         )}
-
-        {aTab==='students' && (
+        {aTab==='students'&&(
           <div className="bg-white rounded-2xl shadow-sm p-5">
-            <h2 className="font-semibold text-gray-700 mb-4">전체 학생 목록 ({students.length}명)</h2>
+            <h2 className="font-semibold text-gray-700 mb-4">전체 학생 ({students.length}명)</h2>
             <div className="space-y-2">
               {students.map(s=>{
                 const cls=classes.find(c=>c.id===s.classId);
-                const teacher=cls?teachers.find(t=>t.id===cls.teacherId):null;
+                const t=cls?teachers.find(t=>t.id===cls.teacherId):null;
                 return (
                   <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3">
-                    <div>
-                      <span className="font-medium text-gray-700">{s.name}</span>
-                      <span className="text-xs text-gray-400 ml-2">{s.schoolType} {s.grade}학년</span>
-                    </div>
+                    <div><span className="font-medium text-gray-700">{s.name}</span>
+                      <span className="text-xs text-gray-400 ml-2">{s.schoolType} {s.grade}학년</span></div>
                     <div className="text-right text-xs text-gray-400">
-                      <p>{cls?.name||'-'} · {teacher?.name||'-'} 선생님</p>
+                      <p>{cls?.name||'-'} · {t?.name||'-'} 선생님</p>
                       <span className="font-mono bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">코드: {s.loginCode}</span>
                     </div>
                   </div>
                 );
               })}
-              {students.length===0&&<p className="text-gray-400 text-sm text-center py-4">등록된 학생이 없습니다.</p>}
+              {students.length===0&&<p className="text-gray-400 text-sm text-center py-4">학생이 없습니다.</p>}
             </div>
           </div>
         )}
